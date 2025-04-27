@@ -1396,6 +1396,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler for callback queries from inline keyboards"""
+    # Declare globals at the beginning of the function
     global COMPRESSION_ENABLED, TIKTOK_QUALITY, BIGO_QUALITY
     
     query = update.callback_query
@@ -2253,17 +2254,6 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"⏰ <b>Interval Cek Akun:</b> {CHECK_INTERVAL} detik\n",
             reply_markup=get_settings_keyboard(),
             parse_mode=ParseMode.HTML
-        )
-    
-    # Toggle compression
-    elif query.data == "toggle_compression":
-        global COMPRESSION_ENABLED
-        COMPRESSION_ENABLED = not COMPRESSION_ENABLED
-        
-        await query.message.edit_text(
-            f"✅ Kompresi video {'diaktifkan' if COMPRESSION_ENABLED else 'dinonaktifkan'}.\n\n"
-            f"Kompresi akan {'mengompres' if COMPRESSION_ENABLED else 'tidak mengompres'} video yang lebih besar dari {format_size(COMPRESSION_THRESHOLD)} secara otomatis untuk menghemat ruang penyimpanan tanpa mengurangi kualitas visual secara signifikan.",
-            reply_markup=get_settings_keyboard()
         )
 
 # ========== MESSAGE HANDLERS ==========
