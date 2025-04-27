@@ -8,6 +8,7 @@ import subprocess
 import re
 import uuid
 import threading
+import queue
 import json
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -44,8 +45,11 @@ os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 # Database untuk menyimpan data pengguna dan job
 DB_PATH = "recorder_bot.db"
 
-#
-notification_queue = asyncio.Queue()
+# Buat thread-safe queue untuk komunikasi antara thread dan event loop
+notification_queue = queue.Queue()
+
+# Flag untuk mengecek apakah notification processor running
+notification_processor_running = False
 
 # Status record
 active_recordings: Dict[str, Dict] = {}
@@ -612,76 +616,79 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
         return False, recording_id, f"Error: {str(e)}"
 
 def monitor_recording_process(recording_id: str, process: subprocess.Popen):
-    """Monitor recording process and update status when done"""
-    # Wait for process to complete
-    stdout, stderr = process.communicate()
-    
-    # Get current time
-    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Check if recording_id still exists in active_recordings
-    if recording_id in active_recordings:
-        recording_info = active_recordings[recording_id]
-        output_file = recording_info["output_file"]
+    """Monitor recording process dan update status ketika selesai"""
+    try:
+        # Tunggu process selesai
+        stdout, stderr = process.communicate()
         
-        # Check if process was terminated normally or forcefully
-        if process.returncode == 0:
-            status = "completed"
-        else:
-            # Check if file exists and has size
-            if os.path.exists(output_file) and get_file_size(output_file) > 0:
-                status = "completed"  # It has some content
+        # Ambil waktu saat ini
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Cek apakah recording_id masih ada di active_recordings
+        if recording_id in active_recordings:
+            recording_info = active_recordings[recording_id]
+            output_file = recording_info["output_file"]
+            
+            # Cek apakah process berakhir normal atau dipaksa berhenti
+            if process.returncode == 0:
+                status = "completed"
             else:
-                status = "failed"
-                logger.error(f"Recording {recording_id} failed: {stderr}")
-        
-        # Update database
-        file_size = get_file_size(output_file) if os.path.exists(output_file) else 0
-        
-        # Check if we need to compress the file
-        compressed_path = None
-        compressed_size = None
-        
-        if status == "completed" and os.path.exists(output_file) and file_size > 0:
-            # If file is large, compress it
-            if COMPRESSION_ENABLED and file_size > COMPRESSION_THRESHOLD:
-                compressed_path = compress_video(output_file)
-                if compressed_path:
-                    compressed_size = get_file_size(compressed_path)
-                    logger.info(f"Compressed {output_file} from {format_size(file_size)} to {format_size(compressed_size)}")
-        
-        # Update database
-        update_recording_status(
-            recording_id=recording_id,
-            status=status,
-            end_time=end_time,
-            file_path=output_file,
-            file_size=file_size,
-            compressed_path=compressed_path,
-            compressed_size=compressed_size
-        )
-        
-        # Clean up
-        del active_recordings[recording_id]
-        if recording_id in recording_processes:
-            del recording_processes[recording_id]
-        
-        # Instead of running asyncio directly, add a notification to the queue
-        # that will be processed by the main event loop
-        try:
-            # Create a dict with notification details
-            notification = {
-                "type": "recording_completed",
+                # Cek jika file ada dan memiliki ukuran
+                if os.path.exists(output_file) and get_file_size(output_file) > 0:
+                    status = "completed"  # Setidaknya ada konten
+                else:
+                    status = "failed"
+                    logger.error(f"Recording {recording_id} failed: {stderr}")
+            
+            # Update database
+            file_size = get_file_size(output_file) if os.path.exists(output_file) else 0
+            
+            # Cek jika perlu compress file
+            compressed_path = None
+            compressed_size = None
+            
+            if status == "completed" and os.path.exists(output_file) and file_size > 0:
+                # Jika ukuran file besar, compress
+                if COMPRESSION_ENABLED and file_size > COMPRESSION_THRESHOLD:
+                    compressed_path = compress_video(output_file)
+                    if compressed_path:
+                        compressed_size = get_file_size(compressed_path)
+                        logger.info(f"Compressed {output_file} from {format_size(file_size)} to {format_size(compressed_size)}")
+            
+            # Update status di database
+            update_recording_status(
+                recording_id=recording_id,
+                status=status,
+                end_time=end_time,
+                file_path=output_file,
+                file_size=file_size,
+                compressed_path=compressed_path,
+                compressed_size=compressed_size
+            )
+            
+            # Simpan info untuk notification
+            notification_info = {
                 "recording_id": recording_id,
-                "status": status
+                "user_id": recording_info["user_id"],
+                "status": status,
+                "platform": recording_info["platform"],
+                "target": recording_info["target"],
+                "file_path": output_file,
+                "file_size": file_size,
+                "compressed_path": compressed_path,
+                "compressed_size": compressed_size
             }
             
-            # Use the global notification_queue to send the notification
-            loop = asyncio.get_running_loop()
-            loop.call_soon_threadsafe(lambda: notification_queue.put_nowait(notification))
-        except RuntimeError:
-            # No running event loop, log the error but don't crash
-            logger.error(f"Could not queue notification for recording {recording_id} - no running loop")
+            # Tambahkan ke notification queue
+            notification_queue.put(notification_info)
+            
+            # Clean up
+            if recording_id in active_recordings:
+                del active_recordings[recording_id]
+            if recording_id in recording_processes:
+                del recording_processes[recording_id]
+    except Exception as e:
+        logger.error(f"Error in monitor_recording_process: {str(e)}")
 
 def compress_video(input_file: str) -> Optional[str]:
     """Compress video using FFmpeg with high quality"""
@@ -877,29 +884,37 @@ def format_duration(seconds: int) -> str:
         return f"{seconds}s"
 
 async def stop_recording(recording_id: str) -> bool:
-    """Stop an active recording"""
-    if recording_id not in active_recordings or recording_id not in recording_processes:
-        return False
-    
+    """Stop active recording"""
     try:
-        # Get process
+        if recording_id not in active_recordings:
+            logger.error(f"Recording ID {recording_id} not found in active_recordings")
+            return False
+            
+        if recording_id not in recording_processes:
+            logger.error(f"Recording ID {recording_id} not found in recording_processes")
+            return False
+        
+        # Get process dan info recording
         process = recording_processes[recording_id]
+        recording_info = active_recordings[recording_id]
         
         # Terminate process
-        process.terminate()
-        
-        # Wait a bit to ensure it's terminated
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()  # Force kill if it doesn't terminate
+            process.terminate()
+            
+            # Tunggu process berhenti
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()  # Force kill jika tidak terminate
+        except Exception as term_error:
+            logger.error(f"Error terminating process: {str(term_error)}")
         
         # Update database
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        output_file = active_recordings[recording_id]["output_file"]
+        output_file = recording_info.get("output_file", "")
         file_size = get_file_size(output_file) if os.path.exists(output_file) else 0
         
-        # Update status in database
         update_recording_status(
             recording_id=recording_id,
             status="stopped",
@@ -908,17 +923,25 @@ async def stop_recording(recording_id: str) -> bool:
             file_size=file_size
         )
         
-        # Instead of cleaning up here, let the monitoring thread handle it
-        # Just mark it as manually stopped
-        active_recordings[recording_id]["manually_stopped"] = True
-        
-        # Add notification to queue for the stopped recording
-        notification = {
-            "type": "recording_completed",
+        # Simpan info untuk notification
+        notification_info = {
             "recording_id": recording_id,
-            "status": "stopped"
+            "user_id": recording_info.get("user_id"),
+            "status": "stopped",
+            "platform": recording_info.get("platform", ""),
+            "target": recording_info.get("target", ""),
+            "file_path": output_file,
+            "file_size": file_size
         }
-        await notification_queue.put(notification)
+        
+        # Tambahkan ke notification queue
+        notification_queue.put(notification_info)
+        
+        # Clean up
+        if recording_id in active_recordings:
+            del active_recordings[recording_id]
+        if recording_id in recording_processes:
+            del recording_processes[recording_id]
         
         return True
     
@@ -2462,26 +2485,127 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
 
 #
-async def process_notifications():
-    """Process notifications from the queue"""
-    while True:
+async def process_notifications(app):
+    """Proses notifications dari queue and send ke user"""
+    global notification_processor_running
+    notification_processor_running = True
+    
+    while notification_processor_running:
         try:
-            # Get a notification from the queue
-            notification = await notification_queue.get()
+            # Cek notification queue (non-blocking)
+            while not notification_queue.empty():
+                try:
+                    # Ambil notification dari queue
+                    notification = notification_queue.get(block=False)
+                    
+                    # Proses notification
+                    recording_id = notification.get("recording_id")
+                    status = notification.get("status")
+                    user_id = notification.get("user_id")
+                    
+                    if recording_id and status and user_id:
+                        # Kirim notifikasi ke user
+                        try:
+                            await notify_user_about_recording(notification, app.bot)
+                        except Exception as notify_err:
+                            logger.error(f"Error sending notification: {str(notify_err)}")
+                    
+                    # Mark task as done
+                    notification_queue.task_done()
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing notification item: {str(e)}")
             
-            # Handle different notification types
-            if notification["type"] == "recording_completed":
-                recording_id = notification["recording_id"]
-                status = notification["status"]
-                await notify_recording_completed(recording_id, status)
-            
-            # Mark task as done
-            notification_queue.task_done()
+            # Sleep sedikit untuk menghemat CPU
+            await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Error processing notification: {str(e)}")
+            logger.error(f"Error in notification processor: {str(e)}")
+            await asyncio.sleep(5)  # Longer sleep on error
+
+async def notify_user_about_recording(notification, bot):
+    """Notify user tentang status recording"""
+    user_id = notification.get("user_id")
+    status = notification.get("status")
+    platform = notification.get("platform", "").upper()
+    target = notification.get("target", "")
+    file_path = notification.get("file_path", "")
+    file_size = notification.get("file_size", 0)
+    compressed_path = notification.get("compressed_path")
+    compressed_size = notification.get("compressed_size", 0)
+    recording_id = notification.get("recording_id", "")
+    
+    # Tentukan file mana yang digunakan (compressed atau original)
+    use_compressed = compressed_path and os.path.exists(compressed_path) and compressed_size > 0
+    actual_file = compressed_path if use_compressed else file_path
+    actual_size = compressed_size if use_compressed else file_size
+    
+    # Prepare message
+    if status == "completed":
+        message = (
+            f"✅ <b>Recording Selesai!</b>\n\n"
+            f"<b>Platform:</b> {platform}\n"
+            f"<b>Target:</b> {target}\n"
+            f"<b>Ukuran:</b> {format_size(actual_size)}"
+        )
         
-        # Small delay to avoid CPU spinning
-        await asyncio.sleep(0.1)
+        if use_compressed:
+            message += f"\n<b>Kompresi:</b> {format_size(file_size)} → {format_size(compressed_size)}"
+            
+        message += f"\n<b>Status:</b> {status.upper()}"
+    else:
+        message = (
+            f"❌ <b>Recording {status.upper()}!</b>\n\n"
+            f"<b>Platform:</b> {platform}\n"
+            f"<b>Target:</b> {target}\n"
+            f"<b>Status:</b> {status.upper()}"
+        )
+    
+    # Add buttons
+    keyboard = []
+    
+    if status == "completed" and os.path.exists(actual_file) and actual_size > 0:
+        # Generate thumbnail
+        thumbnail = generate_thumbnail(actual_file)
+        
+        # Add download button
+        download_button = InlineKeyboardButton(
+            "⬇️ Download", 
+            callback_data=f"download_{recording_id}"
+        )
+        keyboard.append([download_button])
+        
+        # Add delete button
+        delete_button = InlineKeyboardButton(
+            "🗑️ Hapus", 
+            callback_data=f"delete_{recording_id}"
+        )
+        keyboard.append([delete_button])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    
+    # Send message to user
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=message,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Send thumbnail if available
+        if status == "completed" and thumbnail and os.path.exists(thumbnail):
+            try:
+                with open(thumbnail, "rb") as photo:
+                    await bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo,
+                        caption=f"Preview dari {os.path.basename(actual_file)}"
+                    )
+            except Exception as e:
+                logger.error(f"Error sending thumbnail: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error sending notification message: {str(e)}")
 
 # ========== MAIN FUNCTION ==========
 
@@ -2509,14 +2633,14 @@ def main() -> None:
     # Add message handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    # Start account monitoring in background
+    # Start notification processor dan account monitor
     async def start_background_tasks():
         # Start notification processor
-        asyncio.create_task(process_notifications())
+        asyncio.create_task(process_notifications(application))
         # Start account monitor
         asyncio.create_task(run_account_monitor())
     
-    # Schedule the background tasks to run
+    # Schedule background tasks
     application.job_queue.run_once(
         lambda context: asyncio.create_task(start_background_tasks()), 
         when=5  # Start after 5 seconds
