@@ -26,8 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TOKEN = "7839177497:AAFS7PtzQFXmaMkucUUgbdT5SjmEiWAJVRQ"  # Ganti dengan token bot Anda
-ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Anda
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Ganti dengan token bot Anda
+ADMIN_IDS = [12345678]  # Ganti dengan ID admin Anda
 DOWNLOAD_PATH = "downloads/"  # Folder untuk menyimpan hasil rekaman
 
 # Konfigurasi kualitas dan kompresi
@@ -1396,6 +1396,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler for callback queries from inline keyboards"""
+    global COMPRESSION_ENABLED, TIKTOK_QUALITY, BIGO_QUALITY
+    
     query = update.callback_query
     user_id = query.from_user.id
     
