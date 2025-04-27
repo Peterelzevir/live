@@ -1,4 +1,3 @@
-import os
 import logging
 import asyncio
 import sqlite3
@@ -784,6 +783,13 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
         # Prepare log file
         log_file = os.path.join(TEMP_PATH, f"log_tiktok_{username}_{current_time}.txt")
         
+        # Berdasarkan setting kualitas
+        quality_option = "-f best"
+        if TIKTOK_QUALITY == "720p":
+            quality_option = "-f 'best[height<=720]'"
+        elif TIKTOK_QUALITY == "480p":
+            quality_option = "-f 'best[height<=480]'"
+        
         # Prepare command to record using yt-dlp with improved parameters
         import subprocess
         cmd = [
@@ -803,6 +809,9 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
             live_url
         ]
         
+        # Log command yang akan dijalankan
+        logger.info(f"Starting TikTok recording command: {' '.join(cmd)}")
+        
         # Open log file
         with open(log_file, 'w') as log:
             # Start recording process with log redirection
@@ -810,7 +819,8 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
                 cmd, 
                 stdout=log, 
                 stderr=log,
-                text=True
+                text=True,
+                bufsize=1  # Line buffered untuk logging realtime
             )
         
         # Check immediate failure
@@ -848,8 +858,14 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
             "auto_record": auto_record,
             "account_id": account_id,
             "log_file": log_file,
-            "live_url": live_url
+            "live_url": live_url,
+            "original_link": original_link
         }
+        
+        # Buat pid file untuk membantu recovery
+        pid_file = os.path.join(TEMP_PATH, f"pid_{recording_id}.txt")
+        with open(pid_file, 'w') as pf:
+            pf.write(f"{process.pid}\n{output_file}\n{start_time}")
         
         # Store process reference with additional monitoring info
         recording_processes[recording_id] = {
@@ -858,7 +874,9 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
             "pid": process.pid,
             "platform": "tiktok",
             "status_check_time": datetime.now(),
-            "is_alive": True
+            "is_alive": True,
+            "pid_file": pid_file,
+            "quality": TIKTOK_QUALITY
         }
         
         # If recording is for a monitored account, update the account's current recording ID
@@ -866,17 +884,21 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
             update_account_recording_id(account_id, recording_id)
         
         # Start monitoring thread
-        threading.Thread(
+        monitoring_thread = threading.Thread(
             target=monitor_recording_process,
             args=(recording_id, process),
             daemon=True
-        ).start()
+        )
+        monitoring_thread.name = f"monitor-{recording_id}"
+        monitoring_thread.start()
         
-        logger.info(f"Started TikTok recording for {username}, ID: {recording_id}")
+        logger.info(f"Started TikTok recording for {username}, ID: {recording_id}, PID: {process.pid}")
         return True, recording_id, output_file
     
     except Exception as e:
         logger.error(f"Error starting TikTok recording: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False, recording_id, f"Error: {str(e)}"
 
 async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: bool = False,
@@ -904,6 +926,13 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
         # Prepare log file
         log_file = os.path.join(TEMP_PATH, f"log_bigo_{username}_{current_time}.txt")
         
+        # Berdasarkan setting kualitas
+        quality_opt = "best"
+        if BIGO_QUALITY == "720p":
+            quality_opt = "720p,720p_alt,720p60,best"
+        elif BIGO_QUALITY == "480p":
+            quality_opt = "480p,480p_alt,worst"
+        
         # Prepare command to record using streamlink with improved parameters
         import subprocess
         cmd = [
@@ -920,8 +949,11 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
             "--ringbuffer-size", "64M",
             "--loglevel", "debug",  # More detailed logging
             "-o", output_file,
-            live_url, "best"  # Always use best quality
+            live_url, quality_opt
         ]
+        
+        # Log command yang akan dijalankan
+        logger.info(f"Starting Bigo recording command: {' '.join(cmd)}")
         
         # Open log file
         with open(log_file, 'w') as log:
@@ -930,7 +962,8 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
                 cmd, 
                 stdout=log, 
                 stderr=log,
-                text=True
+                text=True,
+                bufsize=1  # Line buffered untuk logging realtime
             )
         
         # Check immediate failure
@@ -968,8 +1001,14 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
             "auto_record": auto_record,
             "account_id": account_id,
             "log_file": log_file,
-            "live_url": live_url
+            "live_url": live_url,
+            "original_link": original_link
         }
+        
+        # Buat pid file untuk membantu recovery
+        pid_file = os.path.join(TEMP_PATH, f"pid_{recording_id}.txt")
+        with open(pid_file, 'w') as pf:
+            pf.write(f"{process.pid}\n{output_file}\n{start_time}")
         
         # Store process reference with additional monitoring info
         recording_processes[recording_id] = {
@@ -978,29 +1017,35 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
             "pid": process.pid,
             "platform": "bigo",
             "status_check_time": datetime.now(),
-            "is_alive": True
+            "is_alive": True,
+            "pid_file": pid_file,
+            "quality": BIGO_QUALITY
         }
         
         # If recording is for a monitored account, update the account's current recording ID
         if account_id:
             update_account_recording_id(account_id, recording_id)
         
-        # Start monitoring thread
-        threading.Thread(
+        # Start monitoring thread dengan nama teridentifikasi
+        monitoring_thread = threading.Thread(
             target=monitor_recording_process,
             args=(recording_id, process),
             daemon=True
-        ).start()
+        )
+        monitoring_thread.name = f"monitor-{recording_id}"
+        monitoring_thread.start()
         
-        logger.info(f"Started Bigo recording for {username}, ID: {recording_id}")
+        logger.info(f"Started Bigo recording for {username}, ID: {recording_id}, PID: {process.pid}")
         return True, recording_id, output_file
     
     except Exception as e:
         logger.error(f"Error starting Bigo recording: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False, recording_id, f"Error: {str(e)}"
 
 def monitor_recording_process(recording_id: str, process):
-    """Monitor recording process and update status when complete, with improved file handling"""
+    """Monitor recording process dan update status ketika selesai, dengan improved file handling"""
     try:
         if recording_id not in recording_processes:
             logger.error(f"Recording process {recording_id} not found in recording_processes")
@@ -1008,6 +1053,27 @@ def monitor_recording_process(recording_id: str, process):
             
         process_info = recording_processes[recording_id]
         start_time = process_info["start_time"]
+        platform = process_info.get("platform", "unknown")
+        quality = process_info.get("quality", "HD")
+        
+        # Dapatkan informasi file dan akun
+        if recording_id not in active_recordings:
+            logger.error(f"Recording {recording_id} not found in active_recordings")
+            return
+            
+        recording_info = active_recordings[recording_id]
+        output_file = recording_info.get("output_file", "")
+        account_id = recording_info.get("account_id")
+        log_file = recording_info.get("log_file", "")
+        
+        # Catat initial file size jika ada
+        initial_file_exists = os.path.exists(output_file)
+        initial_file_size = get_file_size(output_file) if initial_file_exists else 0
+        last_size_check_time = datetime.now()
+        last_checked_size = initial_file_size
+        size_stall_count = 0
+        
+        logger.info(f"Started monitoring {platform} recording {recording_id}, output file: {output_file}")
         
         while True:
             # Check if process is still running
@@ -1017,12 +1083,61 @@ def monitor_recording_process(recording_id: str, process):
             process_info["is_alive"] = is_running
             process_info["status_check_time"] = datetime.now()
             
+            # Cek ukuran file secara berkala
+            current_time = datetime.now()
+            time_since_size_check = (current_time - last_size_check_time).total_seconds()
+            
+            if time_since_size_check > 30:  # Cek ukuran file setiap 30 detik
+                current_size = get_file_size(output_file) if os.path.exists(output_file) else 0
+                
+                # Log progress
+                if current_size > 0:
+                    logger.info(f"Recording {recording_id} progress: {format_size(current_size)}")
+                
+                # Deteksi jika ukuran file tidak bertambah
+                if current_size == last_checked_size and current_size > 0:
+                    size_stall_count += 1
+                    logger.warning(f"Recording {recording_id} size hasn't changed in {size_stall_count * 30} seconds")
+                    
+                    # Cek log file untuk mendeteksi end of stream
+                    if log_file and os.path.exists(log_file):
+                        try:
+                            with open(log_file, 'r') as log:
+                                log_tail = "".join(log.readlines()[-20:])  # Ambil 20 baris terakhir
+                                if "end of file" in log_tail.lower() or "stream ended" in log_tail.lower() or "finished" in log_tail.lower():
+                                    logger.info(f"Detected end of stream in log for {recording_id}")
+                                    break
+                        except Exception as log_error:
+                            logger.error(f"Error reading log file: {str(log_error)}")
+                else:
+                    size_stall_count = 0
+                
+                # Jika ukuran stall terlalu lama (5 menit) tapi file sudah cukup besar, anggap selesai
+                if size_stall_count >= 10 and current_size > 1024 * 1024 * 5:  # 5MB minimum
+                    logger.warning(f"Recording {recording_id} size stalled for 5 minutes. Ending recording.")
+                    break
+                
+                last_checked_size = current_size
+                last_size_check_time = current_time
+            
+            # Perbarui status untuk UI
+            try:
+                update_recording_status(recording_id, "recording", file_size=last_checked_size)
+            except Exception as status_error:
+                logger.error(f"Error updating status: {str(status_error)}")
+            
             # Check if process has been running too long (timeout)
             elapsed_time = (datetime.now() - start_time).total_seconds()
             
             # Check if recording has been manually stopped
             if recording_id not in active_recordings:
                 logger.info(f"Recording {recording_id} has been manually stopped")
+                break
+                
+            # Check for marker file indicating stop command
+            marker_file = f"{TEMP_PATH}/stopping_{recording_id}.marker"
+            if os.path.exists(marker_file):
+                logger.info(f"Found stop marker file for {recording_id}")
                 break
                 
             # If process ended or timed out
@@ -1035,6 +1150,8 @@ def monitor_recording_process(recording_id: str, process):
                             kill_process_tree(process.pid)
                     except Exception as kill_error:
                         logger.error(f"Error killing process {recording_id}: {str(kill_error)}")
+                else:
+                    logger.info(f"Process for recording {recording_id} ended naturally")
                 
                 # Process has ended, break the loop
                 break
@@ -1047,12 +1164,15 @@ def monitor_recording_process(recording_id: str, process):
         
     except Exception as e:
         logger.error(f"Error in monitor_recording_process: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
         # Attempt to finalize recording even after error
         try:
             finalize_recording(recording_id, process)
         except Exception as finalize_error:
             logger.error(f"Error in finalize_recording after monitor error: {str(finalize_error)}")
-
+            
 def finalize_recording(recording_id: str, process):
     """Finalize recording after process ends"""
     try:
@@ -1062,92 +1182,139 @@ def finalize_recording(recording_id: str, process):
         # Cek apakah recording_id masih ada di active_recordings
         if recording_id in active_recordings:
             recording_info = active_recordings[recording_id]
-            output_file = recording_info["output_file"]
+            output_file = recording_info.get("output_file", "")
             account_id = recording_info.get("account_id")
             log_file = recording_info.get("log_file")
+            username = recording_info.get("username", "unknown")
+            platform = recording_info.get("platform", "unknown")
+            
+            logger.info(f"Finalizing {platform} recording for {username}, ID: {recording_id}")
             
             # Wait a moment to ensure file is fully written
-            time.sleep(3)
+            time.sleep(5)
+            
+            # Cek file status
+            file_exists = os.path.exists(output_file)
+            file_size = get_file_size(output_file) if file_exists else 0
+            
+            logger.info(f"Recording file {output_file} exists: {file_exists}, size: {format_size(file_size)}")
             
             # Check if process ended normally or was forced to stop
-            if process.returncode == 0:
-                status = "completed"
-            else:
-                # Check if file exists and has size
-                if os.path.exists(output_file) and get_file_size(output_file) > 0:
-                    status = "completed"  # At least some content was captured
-                else:
-                    status = "failed"
-                    
-                    # Check log file for specific errors
-                    if log_file and os.path.exists(log_file):
-                        try:
-                            with open(log_file, 'r') as log:
-                                log_content = log.read()
-                                if "ERROR: Unable to download webpage" in log_content:
-                                    status = "ended"
-                                elif "Stream ended" in log_content or "Stream offline" in log_content:
-                                    status = "ended"
-                        except Exception as log_error:
-                            logger.error(f"Error reading log file: {str(log_error)}")
+            status = "unknown"
             
-            # If recording failed but we have a partial file with content
-            if status == "failed" and os.path.exists(output_file) and get_file_size(output_file) > 2 * 1024 * 1024:  # > 2MB
-                status = "partial"  # Mark as partially completed
+            if file_exists and file_size > 5 * 1024 * 1024:  # >5MB
+                status = "completed"
+                logger.info(f"Recording {recording_id} completed with good file size")
+            elif file_exists and file_size > 0:
+                # File exists but small, check log for clues
+                status = "partial"
+                
+                # Check log file for specific errors
+                if log_file and os.path.exists(log_file):
+                    try:
+                        with open(log_file, 'r') as log:
+                            log_content = log.read()
+                            if "ERROR: Unable to download webpage" in log_content:
+                                status = "ended"
+                                logger.info(f"Recording {recording_id} ended due to webpage access error")
+                            elif "Stream ended" in log_content or "Stream offline" in log_content or "end of file" in log_content:
+                                status = "ended"
+                                logger.info(f"Recording {recording_id} ended normally because stream ended")
+                    except Exception as log_error:
+                        logger.error(f"Error reading log file: {str(log_error)}")
+            else:
+                # No file or zero size
+                status = "failed"
+                logger.warning(f"Recording {recording_id} failed - no output file or zero size")
+            
+            # Check if file was stop requested
+            marker_file = f"{TEMP_PATH}/stopping_{recording_id}.marker"
+            if os.path.exists(marker_file):
+                logger.info(f"Recording {recording_id} was manually stopped")
+                if file_exists and file_size > 0:
+                    status = "stopped"
+            
+            logger.info(f"Final status for recording {recording_id}: {status}")
             
             # Update database
-            file_size = get_file_size(output_file) if os.path.exists(output_file) else 0
-            
-            # Check if need to compress file
-            compressed_path = None
-            compressed_size = None
-            
-            if status in ["completed", "partial"] and os.path.exists(output_file) and file_size > 0:
-                # If file size is large, compress
-                if COMPRESSION_ENABLED and file_size > COMPRESSION_THRESHOLD:
-                    compressed_path = compress_video(output_file)
-                    if compressed_path:
-                        compressed_size = get_file_size(compressed_path)
-                        logger.info(f"Compressed {output_file} from {format_size(file_size)} to {format_size(compressed_size)}")
-            
-            # Update status in database
             update_recording_status(
                 recording_id=recording_id,
                 status=status,
                 end_time=end_time,
                 file_path=output_file,
-                file_size=file_size,
-                compressed_path=compressed_path,
-                compressed_size=compressed_size
+                file_size=file_size
             )
             
             # If this was a monitored account recording, update the account
             if account_id:
                 update_account_recording_id(account_id, None)
+                logger.info(f"Reset current_recording_id for account {account_id}")
+            
+            # Check if need to compress file
+            compressed_path = None
+            compressed_size = None
+            
+            if status in ["completed", "stopped", "partial"] and file_exists and file_size > COMPRESSION_THRESHOLD:
+                # If file size is large, compress
+                if COMPRESSION_ENABLED:
+                    logger.info(f"Starting compression for {output_file} ({format_size(file_size)})")
+                    compressed_path = compress_video(output_file)
+                    if compressed_path:
+                        compressed_size = get_file_size(compressed_path)
+                        logger.info(f"Compressed {output_file} from {format_size(file_size)} to {format_size(compressed_size)}")
+                        
+                        # Update database with compression info
+                        update_recording_status(
+                            recording_id=recording_id,
+                            status=status,
+                            compressed_path=compressed_path,
+                            compressed_size=compressed_size
+                        )
             
             # Save info for notification
             notification_info = {
                 "recording_id": recording_id,
-                "user_id": recording_info["user_id"],
+                "user_id": recording_info.get("user_id"),
                 "status": status,
-                "platform": recording_info["platform"],
-                "target": recording_info["target"],
+                "platform": platform,
+                "target": recording_info.get("target", ""),
                 "file_path": output_file,
                 "file_size": file_size,
                 "compressed_path": compressed_path,
-                "compressed_size": compressed_size
+                "compressed_size": compressed_size,
+                "username": username
             }
             
             # Add to notification queue
             notification_queue.put(notification_info)
+            logger.info(f"Added notification to queue for recording {recording_id}")
             
             # Clean up
             if recording_id in active_recordings:
                 del active_recordings[recording_id]
             if recording_id in recording_processes:
                 del recording_processes[recording_id]
+                
+            # Remove marker file if exists
+            try:
+                if os.path.exists(marker_file):
+                    os.remove(marker_file)
+            except:
+                pass
+                
+            # Remove pid file if exists
+            pid_file = os.path.join(TEMP_PATH, f"pid_{recording_id}.txt")
+            try:
+                if os.path.exists(pid_file):
+                    os.remove(pid_file)
+            except:
+                pass
+                
+            logger.info(f"Recording {recording_id} finalized successfully with status: {status}")
     except Exception as e:
         logger.error(f"Error in finalize_recording: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 def compress_video(input_file: str) -> Optional[str]:
     """Compress video using FFmpeg with high quality"""
@@ -1210,6 +1377,12 @@ async def check_livestream_status(account_id: int, platform: str, username: str,
             if recording and recording["status"] == "recording":
                 already_recording = True
                 logger.info(f"Account {username} on {platform} is already being recorded, ID: {current_recording_id}")
+                
+                # Jika recording ID ada tapi tidak ada di active_recordings, reset state
+                if current_recording_id not in active_recordings:
+                    already_recording = False
+                    update_account_recording_id(account_id, None)
+                    logger.warning(f"Reset recording state for {username} on {platform} (recording not found in active_recordings)")
         
         # Use improved livestream detection
         if platform == "tiktok":
@@ -1265,6 +1438,13 @@ async def check_livestream_status(account_id: int, platform: str, username: str,
             
             # Auto-record if enabled and not notify-only and not already recording
             if auto_record and not notify_only and not already_recording:
+                # Kirim notifikasi bahwa akan mulai auto-record
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"⏳ <b>Memulai Auto-Record untuk {platform.upper()}: {username}...</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                
                 if platform == "tiktok":
                     success, recording_id, result = await start_tiktok_recording(
                         username, user_id, auto_record=True, account_id=account_id
@@ -1278,17 +1458,36 @@ async def check_livestream_status(account_id: int, platform: str, username: str,
                     # Update livestream history
                     update_livestream_history(history_id, None, 0, was_recorded=True, recording_id=recording_id)
                     
-                    # Send additional notification
+                    # Informasi recording untuk keyboard
+                    file_path = ""
+                    status = "recording"
+                    
+                    # Get recording info untuk ditampilkan
+                    recording = get_recording_by_id(recording_id)
+                    if recording:
+                        file_path = recording.get("file_path", "")
+                        
+                    # Send success notification with more info
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"✅ <b>Auto-Record dimulai untuk {platform.upper()}: {username}</b>\n\nID: <code>{recording_id}</code>",
-                        parse_mode=ParseMode.HTML
+                        text=f"✅ <b>Auto-Record dimulai untuk {platform.upper()}: {username}</b>\n\n"
+                             f"ID: <code>{recording_id}</code>\n"
+                             f"Status: <b>RECORDING</b>\n"
+                             f"Output: <code>{os.path.basename(file_path)}</code>\n\n"
+                             f"<i>Recording akan berjalan sampai livestream berakhir atau dihentikan manual.</i>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⏹️ Stop Recording", callback_data=f"stop_{recording_id}")],
+                            [InlineKeyboardButton("📋 Lihat Rekaman Aktif", callback_data="list_active")]
+                        ])
                     )
                 else:
-                    # Send failure notification
+                    # Send failure notification with more detail
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"⚠️ <b>Gagal memulai Auto-Record untuk {platform.upper()}: {username}</b>\n\nError: {result}",
+                        text=f"❌ <b>Gagal memulai Auto-Record untuk {platform.upper()}: {username}</b>\n\n"
+                             f"Error: {result}\n\n"
+                             f"<i>Bot akan mencoba lagi pada pemeriksaan berikutnya.</i>",
                         parse_mode=ParseMode.HTML
                     )
                     
@@ -1332,12 +1531,33 @@ async def check_livestream_status(account_id: int, platform: str, username: str,
                 if current_recording_id:
                     recording = get_recording_by_id(current_recording_id)
                     if recording and recording["status"] == "recording":
+                        # Kirim notifikasi bahwa auto-record akan dihentikan
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"⏹️ <b>Menghentikan Auto-Record untuk {platform.upper()}: {username}</b>\n\n"
+                                 f"<i>Livestream telah berakhir.</i>",
+                            parse_mode=ParseMode.HTML
+                        )
+                        
                         # Stop the recording
-                        await stop_recording(current_recording_id)
-                        logger.info(f"Auto-stopped recording {current_recording_id} for {platform}/{username} as stream ended")
+                        success = await stop_recording(current_recording_id)
+                        
+                        if success:
+                            logger.info(f"Auto-stopped recording {current_recording_id} for {platform}/{username} as stream ended")
+                        else:
+                            logger.error(f"Failed to auto-stop recording {current_recording_id} for {platform}/{username}")
         
         # If still live and auto-record is enabled but we're not recording (maybe bot restarted)
         elif is_live and was_live and auto_record and not notify_only and not already_recording:
+            # Kirim notifikasi bahwa akan memulai rekaman yang terlewat
+            bot = Application.get_instance().bot
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"⏳ <b>Mendeteksi livestream aktif yang belum direkam untuk {platform.upper()}: {username}</b>\n\n"
+                     f"<i>Memulai Auto-Record...</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
             # Start recording
             if platform == "tiktok":
                 success, recording_id, result = await start_tiktok_recording(
@@ -1349,18 +1569,35 @@ async def check_livestream_status(account_id: int, platform: str, username: str,
                 )
             
             if success:
-                # Send notification
-                bot = Application.get_instance().bot
+                # Informasi recording untuk keyboard
+                file_path = ""
+                status = "recording"
+                
+                # Get recording info untuk ditampilkan
+                recording = get_recording_by_id(recording_id)
+                if recording:
+                    file_path = recording.get("file_path", "")
+                    
+                # Send notification with more details
                 await bot.send_message(
                     chat_id=user_id,
                     text=(f"✅ <b>Auto-Record dilanjutkan untuk {platform.upper()}: {username}</b>\n\n"
                           f"ID: <code>{recording_id}</code>\n"
-                          f"(Bot mungkin telah dimulai ulang)"),
-                    parse_mode=ParseMode.HTML
+                          f"Status: <b>RECORDING</b>\n"
+                          f"Output: <code>{os.path.basename(file_path)}</code>\n\n"
+                          f"<i>Livestream sudah berlangsung dan sedang direkam.</i>"),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⏹️ Stop Recording", callback_data=f"stop_{recording_id}")],
+                        [InlineKeyboardButton("📋 Lihat Rekaman Aktif", callback_data="list_active")]
+                    ])
                 )
                 
     except Exception as e:
         logger.error(f"Error checking livestream status: {str(e)}")
+        # Log stack trace for debugging
+        import traceback
+        logger.error(traceback.format_exc())
 
 def format_duration(seconds: int) -> str:
     """Format seconds to human-readable duration"""
@@ -1377,13 +1614,26 @@ def format_duration(seconds: int) -> str:
 async def stop_recording(recording_id: str) -> bool:
     """Stop active recording with improved error handling and process management"""
     try:
+        # Memastikan recording masih ada di active_recordings
         if recording_id not in active_recordings:
             logger.error(f"Recording ID {recording_id} not found in active_recordings")
             return False
             
+        # Memastikan proses masih ada di recording_processes
         if recording_id not in recording_processes:
             logger.error(f"Recording ID {recording_id} not found in recording_processes")
             return False
+        
+        # Get recording info sebelum di-stop
+        recording_info = active_recordings[recording_id]
+        platform = recording_info.get("platform", "")
+        output_file = recording_info.get("output_file", "")
+        log_file = recording_info.get("log_file", "")
+        account_id = recording_info.get("account_id")
+        
+        # Catat file size sebelum menghentikan proses
+        initial_file_exists = os.path.exists(output_file)
+        initial_file_size = get_file_size(output_file) if initial_file_exists else 0
         
         # Get process info
         process_info = recording_processes[recording_id]
@@ -1394,52 +1644,99 @@ async def stop_recording(recording_id: str) -> bool:
             logger.error(f"Process object not found for recording {recording_id}")
             return False
         
+        # Update status to stopping
+        update_recording_status(recording_id, "stopping")
+        logger.info(f"Stopping {platform} recording {recording_id} with PID {pid}")
+        
+        # Membuat file temporary marker sehingga tahu proses sedang dihentikan
+        marker_file = f"{TEMP_PATH}/stopping_{recording_id}.marker"
+        with open(marker_file, 'w') as f:
+            f.write(f"Stopping recording {recording_id} at {datetime.now().isoformat()}")
+        
+        # Buat copy dari file output jika sudah ada (safeguard)
+        if initial_file_exists and initial_file_size > 0:
+            try:
+                backup_file = f"{output_file}.stopping_backup"
+                import shutil
+                shutil.copy2(output_file, backup_file)
+                logger.info(f"Created backup of recording file: {backup_file}")
+            except Exception as backup_error:
+                logger.error(f"Error creating backup: {str(backup_error)}")
+        
         # Check if process is still running
         is_running = is_process_running(process)
         
         if is_running:
-            # Update status to stopping
-            update_recording_status(recording_id, "stopping")
-            
-            # Get recording info
-            recording_info = active_recordings[recording_id]
-            platform = recording_info.get("platform", "")
-            
-            logger.info(f"Stopping {platform} recording {recording_id} with PID {pid}")
-            
-            # Kill process and all its children
+            # Coba soft terminate dulu (SIGTERM)
             try:
-                kill_process_tree(pid)
+                process.terminate()
                 
-                # Give some time for the process to clean up
-                for _ in range(5):  # Wait up to 5 seconds
+                # Tunggu 5 detik untuk proses berakhir secara bersih
+                for _ in range(5):
                     if not is_process_running(process):
+                        logger.info(f"Process {pid} terminated cleanly")
                         break
                     time.sleep(1)
                 
+                # Jika masih berjalan, kill process and all its children (force kill)
+                if is_process_running(process):
+                    logger.info(f"Process {pid} did not terminate, using kill_process_tree")
+                    kill_process_tree(pid)
             except Exception as term_error:
                 logger.error(f"Error terminating process: {str(term_error)}")
+                # Tetap coba kill process tree jika terminate gagal
+                try:
+                    kill_process_tree(pid)
+                except Exception as kill_error:
+                    logger.error(f"Error killing process tree: {str(kill_error)}")
         
         # Record end time
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Get output file and check size
-        recording_info = active_recordings[recording_id]
-        output_file = recording_info.get("output_file", "")
-        account_id = recording_info.get("account_id")
+        # Tunggu lebih lama untuk memastikan file selesai ditulis/dirilis
+        # Ini penting untuk memastikan file tidak corrupt
+        time.sleep(5)
         
-        # Wait a bit to ensure file is released
-        time.sleep(2)
-        
-        # Check file status
+        # Check file status setelah proses dihentikan
         file_exists = os.path.exists(output_file)
         file_size = get_file_size(output_file) if file_exists else 0
         
+        # Cek apakah ada backup file dan apakah perlu direstore
+        backup_file = f"{output_file}.stopping_backup"
+        if os.path.exists(backup_file):
+            backup_size = get_file_size(backup_file)
+            
+            # Jika file asli hilang atau ukurannya berkurang, restore dari backup
+            if (not file_exists or file_size < initial_file_size) and backup_size >= initial_file_size:
+                try:
+                    import shutil
+                    shutil.copy2(backup_file, output_file)
+                    logger.info(f"Restored recording file from backup: {backup_file} -> {output_file}")
+                    file_exists = os.path.exists(output_file)
+                    file_size = get_file_size(output_file)
+                except Exception as restore_error:
+                    logger.error(f"Error restoring from backup: {str(restore_error)}")
+        
         # Determine status based on file
-        if file_exists and file_size > 0:
+        if file_exists and file_size > 1024 * 1024:  # File lebih besar dari 1MB
             status = "stopped"  # Successfully stopped with content
+        elif file_exists and file_size > 0:
+            status = "partial"  # File ada tapi mungkin tidak lengkap
         else:
-            status = "failed"   # Stopped but no content
+            # Coba cek log file untuk informasi tambahan
+            log_content = ""
+            if log_file and os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r') as log:
+                        log_content = log.read()
+                except Exception as log_error:
+                    logger.error(f"Error reading log file: {str(log_error)}")
+                    
+            # Jika log menunjukkan stream ended, set status ke ended
+            if "Stream ended" in log_content or "stream ended" in log_content or "no longer live" in log_content:
+                status = "ended"
+            else:
+                status = "failed"   # Stopped but no content
         
         # Update database
         update_recording_status(
@@ -1473,12 +1770,39 @@ async def stop_recording(recording_id: str) -> bool:
             del active_recordings[recording_id]
         if recording_id in recording_processes:
             del recording_processes[recording_id]
+            
+        # Remove marker file
+        if os.path.exists(marker_file):
+            try:
+                os.remove(marker_file)
+            except:
+                pass
+                
+        # Remove backup file jika ada
+        if os.path.exists(backup_file):
+            try:
+                os.remove(backup_file)
+            except:
+                pass
         
         logger.info(f"Recording {recording_id} stopped successfully with status: {status}")
         return True
     
     except Exception as e:
         logger.error(f"Error stopping recording {recording_id}: {str(e)}")
+        # Tetap coba membersihkan resources untuk mencegah zombie process
+        try:
+            if recording_id in recording_processes:
+                process_info = recording_processes[recording_id]
+                pid = process_info.get("pid")
+                if pid:
+                    kill_process_tree(pid)
+                del recording_processes[recording_id]
+            
+            if recording_id in active_recordings:
+                del active_recordings[recording_id]
+        except:
+            pass
         return False
 
 async def notify_recording_completed(notification):
@@ -1703,57 +2027,108 @@ def get_monitored_accounts_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_account_details_keyboard(account_id: int) -> InlineKeyboardMarkup:
     """Create keyboard for account details"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM monitored_accounts WHERE id = ?", (account_id,))
-    account = cursor.fetchone()
-    conn.close()
-    
-    if not account:
-        # Return to monitored accounts list if account not found
-        return InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali", callback_data="list_monitored")]])
-    
-    auto_record = bool(account["auto_record"])
-    notify_only = bool(account["notify_only"])
-    is_live = bool(account["is_live"])
-    platform = account["platform"]
-    username = account["username"]
-    current_recording_id = account.get("current_recording_id")
-    
-    keyboard = []
-    
-    # Toggle auto-record
-    auto_text = "❌ Matikan Auto-Record" if auto_record else "✅ Aktifkan Auto-Record"
-    keyboard.append([InlineKeyboardButton(auto_text, callback_data=f"toggle_auto_{account_id}")])
-    
-    # Toggle notify-only
-    notify_text = "❌ Matikan Notifikasi Saja" if notify_only else "✅ Aktifkan Notifikasi Saja"
-    keyboard.append([InlineKeyboardButton(notify_text, callback_data=f"toggle_notify_{account_id}")])
-    
-    # If currently live but not recording, add record now button
-    if is_live:
+    try:
+        # Cek apakah account_id valid
+        if not account_id or not isinstance(account_id, int):
+            logger.error(f"Invalid account_id: {account_id}")
+            return InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali", callback_data="list_monitored")]])
+        
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM monitored_accounts WHERE id = ?", (account_id,))
+        account = cursor.fetchone()
+        
+        if not account:
+            # Return to monitored accounts list if account not found
+            conn.close()
+            logger.warning(f"Account with ID {account_id} not found in database")
+            return InlineKeyboardMarkup([[InlineKeyboardButton("« Kembali", callback_data="list_monitored")]])
+            
+        # Convert SQLite row to dictionary
+        account_dict = dict(account)
+        
+        # Safely get values with defaults
+        auto_record = bool(account_dict.get("auto_record", 0))
+        notify_only = bool(account_dict.get("notify_only", 0))
+        is_live = bool(account_dict.get("is_live", 0))
+        platform = account_dict.get("platform", "unknown")
+        username = account_dict.get("username", "unknown")
+        current_recording_id = account_dict.get("current_recording_id")
+        
+        conn.close()
+        
+        keyboard = []
+        
+        # Check if current_recording_id is valid and active
+        recording_active = False
         if current_recording_id:
-            # If already recording, add button to view recording
-            keyboard.append([InlineKeyboardButton("👁️ Lihat Rekaman Aktif", callback_data=f"view_{current_recording_id}")])
-            keyboard.append([InlineKeyboardButton("⏹️ Stop Rekaman", callback_data=f"stop_{current_recording_id}")])
-        else:
-            # Otherwise, add record now button
-            if platform == "tiktok":
-                record_data = f"record_monitor_tiktok_{username}"
+            recording = get_recording_by_id(current_recording_id)
+            recording_active = recording and recording.get("status") == "recording"
+            
+            # If recording ID exists but not active, clean up the reference
+            if not recording_active and recording:
+                update_account_recording_id(account_id, None)
+                current_recording_id = None
+        
+        # Toggle auto-record
+        auto_text = "❌ Matikan Auto-Record" if auto_record else "✅ Aktifkan Auto-Record"
+        keyboard.append([InlineKeyboardButton(auto_text, callback_data=f"toggle_auto_{account_id}")])
+        
+        # Toggle notify-only
+        notify_text = "❌ Matikan Notifikasi Saja" if notify_only else "✅ Aktifkan Notifikasi Saja"
+        keyboard.append([InlineKeyboardButton(notify_text, callback_data=f"toggle_notify_{account_id}")])
+        
+        # Status LIVE
+        if is_live:
+            # Refresh status
+            keyboard.append([InlineKeyboardButton("🔄 Refresh Status LIVE", callback_data=f"refresh_live_{account_id}")])
+            
+            # If currently recording
+            if recording_active and current_recording_id:
+                # Add button to view recording details
+                keyboard.append([InlineKeyboardButton("👁️ Lihat Rekaman Aktif", callback_data=f"view_{current_recording_id}")])
+                keyboard.append([InlineKeyboardButton("⏹️ Stop Rekaman", callback_data=f"stop_{current_recording_id}")])
             else:
-                record_data = f"record_monitor_bigo_{username}"
+                # Otherwise, add record now button
+                if platform == "tiktok":
+                    record_data = f"record_monitor_tiktok_{username}"
+                else:  # bigo
+                    record_data = f"record_monitor_bigo_{username}"
+                    
+                keyboard.append([InlineKeyboardButton("🎥 Rekam Sekarang", callback_data=record_data)])
                 
-            keyboard.append([InlineKeyboardButton("🎥 Rekam Sekarang", callback_data=record_data)])
-    
-    # Delete account
-    keyboard.append([InlineKeyboardButton("🗑️ Hapus Akun", callback_data=f"delete_account_{account_id}")])
-    
-    # Back button
-    keyboard.append([InlineKeyboardButton("« Kembali", callback_data="list_monitored")])
-    
-    return InlineKeyboardMarkup(keyboard)
+                # Add direct link to livestream
+                if platform == "tiktok":
+                    link = f"https://www.tiktok.com/@{username}/live"
+                else:  # bigo
+                    link = f"https://www.bigo.tv/{username}"
+                    
+                keyboard.append([InlineKeyboardButton("👁️ Tonton Livestream", url=link)])
+        else:
+            # Check now button when not live
+            keyboard.append([InlineKeyboardButton("🔍 Cek Status Sekarang", callback_data=f"check_now_{account_id}")])
+        
+        # Test record (untuk debugging)
+        if is_admin(account_dict.get("user_id", 0)):
+            keyboard.append([InlineKeyboardButton("🧪 Test Record", callback_data=f"test_record_{account_id}")])
+        
+        # Delete account
+        keyboard.append([InlineKeyboardButton("🗑️ Hapus Akun", callback_data=f"delete_account_{account_id}")])
+        
+        # Back button
+        keyboard.append([InlineKeyboardButton("« Kembali", callback_data="list_monitored")])
+        
+        return InlineKeyboardMarkup(keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error creating account details keyboard: {str(e)}")
+        # Fallback to simple keyboard
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚠️ Error: Refresh", callback_data=f"monitor_{account_id}")],
+            [InlineKeyboardButton("« Kembali", callback_data="list_monitored")]
+        ])
 
 def get_back_button() -> InlineKeyboardMarkup:
     """Create back button keyboard"""
@@ -2037,8 +2412,12 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     query = update.callback_query
     user_id = query.from_user.id
     
-    # Always acknowledge the callback query
-    await query.answer()
+    # Exception handling untuk callback
+    try:
+        # Always acknowledge the callback query
+        await query.answer()
+    except Exception as e:
+        logger.error(f"Error acknowledging callback query: {str(e)}")
     
     # Main menu
     if query.data == "main_menu":
@@ -2809,83 +3188,120 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     # View monitored account
     elif query.data.startswith("monitor_"):
-        account_id = int(query.data.split("_")[1])
-        
-        account = get_account_by_id(account_id)
-        
-        if not account:
+        try:
+            parts = query.data.split("_")
+            if len(parts) < 2:
+                raise ValueError(f"Invalid monitor command format: {query.data}")
+                
+            account_id = int(parts[1])
+            
+            # Get account with error handling
+            account = get_account_by_id(account_id)
+            
+            if not account:
+                await query.message.edit_text(
+                    "❌ <b>Akun tidak ditemukan.</b>\n\n"
+                    "Akun mungkin telah dihapus atau terjadi kesalahan database.",
+                    reply_markup=get_back_button(),
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            # Get account info dengan safely
+            platform = account.get("platform", "unknown").upper()
+            username = account.get("username", "unknown")
+            is_live = bool(account.get("is_live", 0))
+            auto_record = bool(account.get("auto_record", 0))
+            notify_only = bool(account.get("notify_only", 0))
+            added_time = account.get("added_time", "unknown")
+            last_check = account.get("last_check", "unknown")
+            current_recording_id = account.get("current_recording_id")
+            
+            # Verify current_recording_id is still valid
+            recording_active = False
+            if current_recording_id:
+                recording = get_recording_by_id(current_recording_id)
+                if recording and recording.get("status") == "recording":
+                    recording_active = True
+                else:
+                    # Reset recording ID if not active
+                    update_account_recording_id(account_id, None)
+                    current_recording_id = None
+            
+            # Get livestream history
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                """SELECT * FROM livestream_history 
+                WHERE account_id = ? 
+                ORDER BY start_time DESC LIMIT 5""", 
+                (account_id,)
+            )
+            
+            history = cursor.fetchall()
+            conn.close()
+            
+            # Build message text
+            text = f"🔔 <b>DETAIL AKUN {platform}</b> 🔔\n\n"
+            text += f"<b>Username:</b> {username}\n"
+            text += f"<b>Status:</b> {'🔴 LIVE' if is_live else '⚫ Offline'}\n"
+            text += f"<b>Auto-Record:</b> {'✅ Aktif' if auto_record else '❌ Nonaktif'}\n"
+            
+            if notify_only:
+                text += f"<b>Mode:</b> Notifikasi Saja (tidak merekam otomatis)\n"
+            
+            if recording_active and current_recording_id:
+                text += f"<b>Sedang Direkam:</b> ✅ (ID: {current_recording_id[:8]}...)\n"
+                
+            text += f"<b>Ditambahkan:</b> {added_time}\n"
+            text += f"<b>Terakhir dicek:</b> {last_check}\n\n"
+            
+            if history:
+                text += f"<b>Riwayat Livestream Terakhir:</b>\n"
+                for idx, h in enumerate(history, 1):
+                    start_time = h["start_time"]
+                    end_time = h["end_time"] or "Masih berlangsung"
+                    was_recorded = bool(h["was_recorded"])
+                    recording_id = h["recording_id"]
+                    
+                    duration_str = ""
+                    if h["end_time"]:
+                        start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                        end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                        duration = end_dt - start_dt
+                        duration_str = f" ({format_duration(duration.seconds)})"
+                    
+                    text += f"{idx}. {start_time} s/d {end_time}{duration_str}\n"
+                    if was_recorded:
+                        text += f"   ✅ Terekam (ID: {recording_id[:8] if recording_id else 'N/A'})\n"
+                    
+                    if idx < len(history):
+                        text += "\n"
+            
+            # Create keyboard dengan error handling
+            keyboard = get_account_details_keyboard(account_id)
+            
             await query.message.edit_text(
-                "❌ <b>Akun tidak ditemukan.</b>",
-                reply_markup=get_back_button(),
+                text,
+                reply_markup=keyboard,
                 parse_mode=ParseMode.HTML
             )
-            return
-        
-        platform = account["platform"].upper()
-        username = account["username"]
-        is_live = bool(account["is_live"])
-        auto_record = bool(account["auto_record"])
-        notify_only = bool(account["notify_only"])
-        added_time = account["added_time"]
-        last_check = account["last_check"]
-        current_recording_id = account.get("current_recording_id")
-        
-        # Get livestream history
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            """SELECT * FROM livestream_history 
-            WHERE account_id = ? 
-            ORDER BY start_time DESC LIMIT 5""", 
-            (account_id,)
-        )
-        
-        history = cursor.fetchall()
-        conn.close()
-        
-        text = f"🔔 <b>DETAIL AKUN {platform}</b> 🔔\n\n"
-        text += f"<b>Username:</b> {username}\n"
-        text += f"<b>Status:</b> {'🔴 LIVE' if is_live else '⚫ Offline'}\n"
-        text += f"<b>Auto-Record:</b> {'✅ Aktif' if auto_record else '❌ Nonaktif'}\n"
-        
-        if notify_only:
-            text += f"<b>Mode:</b> Notifikasi Saja (tidak merekam otomatis)\n"
-        
-        if current_recording_id:
-            text += f"<b>Sedang Direkam:</b> ✅ (ID: {current_recording_id[:8]}...)\n"
             
-        text += f"<b>Ditambahkan:</b> {added_time}\n"
-        text += f"<b>Terakhir dicek:</b> {last_check}\n\n"
-        
-        if history:
-            text += f"<b>Riwayat Livestream Terakhir:</b>\n"
-            for idx, h in enumerate(history, 1):
-                start_time = h["start_time"]
-                end_time = h["end_time"] or "Masih berlangsung"
-                was_recorded = bool(h["was_recorded"])
-                recording_id = h["recording_id"]
-                
-                duration_str = ""
-                if h["end_time"]:
-                    start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-                    end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
-                    duration = end_dt - start_dt
-                    duration_str = f" ({format_duration(duration.seconds)})"
-                
-                text += f"{idx}. {start_time} s/d {end_time}{duration_str}\n"
-                if was_recorded:
-                    text += f"   ✅ Terekam (ID: {recording_id[:8] if recording_id else 'N/A'})\n"
-                
-                if idx < len(history):
-                    text += "\n"
-        
-        await query.message.edit_text(
-            text,
-            reply_markup=get_account_details_keyboard(account_id),
-            parse_mode=ParseMode.HTML
-        )
+        except Exception as e:
+            logger.error(f"Error handling monitor command: {str(e)}")
+            # Show error message with option to go back
+            await query.message.edit_text(
+                f"❌ <b>Terjadi kesalahan saat menampilkan akun:</b>\n\n"
+                f"Error: {str(e)}\n\n"
+                f"<i>Silakan coba lagi atau kembali ke menu sebelumnya.</i>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Coba Lagi", callback_data=query.data)],
+                    [InlineKeyboardButton("« Kembali", callback_data="list_monitored")]
+                ]),
+                parse_mode=ParseMode.HTML
+            )
     
     # Toggle auto-record
     elif query.data.startswith("toggle_auto_"):
@@ -3493,6 +3909,342 @@ def cleanup_on_shutdown():
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
+# ========== NEW CALLBACK HANDLERS ==========
+
+async def handle_check_now(update: Update, context: ContextTypes.DEFAULT_TYPE, account_id: int) -> None:
+    """Handler for checking account status now"""
+    try:
+        # Get account info
+        account = get_account_by_id(account_id)
+        if not account:
+            await update.callback_query.message.edit_text(
+                "❌ <b>Akun tidak ditemukan.</b>",
+                reply_markup=get_back_button(),
+                parse_mode=ParseMode.HTML
+            )
+            return
+            
+        user_id = account["user_id"]
+        platform = account["platform"]
+        username = account["username"]
+        
+        # Update message
+        await update.callback_query.message.edit_text(
+            f"⏳ <b>Memeriksa status {platform.upper()} untuk {username}...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Check livestream status
+        if platform == "tiktok":
+            is_live, username, live_url = await check_tiktok_live(username)
+        else:  # bigo
+            is_live, username, live_url = await check_bigo_live(username)
+            
+        # Update status in database
+        update_account_live_status(account_id, is_live)
+        
+        # Reload account data
+        account = get_account_by_id(account_id)
+        
+        # Show account details
+        platform = account["platform"].upper()
+        username = account["username"]
+        is_live = bool(account["is_live"])
+        auto_record = bool(account["auto_record"])
+        notify_only = bool(account["notify_only"])
+        added_time = account["added_time"]
+        last_check = account["last_check"]
+        current_recording_id = account.get("current_recording_id")
+        
+        # Get livestream history
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            """SELECT * FROM livestream_history 
+            WHERE account_id = ? 
+            ORDER BY start_time DESC LIMIT 5""", 
+            (account_id,)
+        )
+        
+        history = cursor.fetchall()
+        conn.close()
+        
+        text = f"🔔 <b>DETAIL AKUN {platform}</b> 🔔\n\n"
+        text += f"<b>Username:</b> {username}\n"
+        text += f"<b>Status:</b> {'🔴 LIVE' if is_live else '⚫ Offline'} (Baru dicek)\n"
+        text += f"<b>Auto-Record:</b> {'✅ Aktif' if auto_record else '❌ Nonaktif'}\n"
+        
+        if notify_only:
+            text += f"<b>Mode:</b> Notifikasi Saja (tidak merekam otomatis)\n"
+        
+        if current_recording_id:
+            text += f"<b>Sedang Direkam:</b> ✅ (ID: {current_recording_id[:8]}...)\n"
+            
+        text += f"<b>Ditambahkan:</b> {added_time}\n"
+        text += f"<b>Terakhir dicek:</b> {last_check}\n\n"
+        
+        if is_live:
+            text += f"<b>Status Livestream:</b> 🔴 LIVE!\n\n"
+        else:
+            text += f"<b>Status Livestream:</b> ⚫ Offline\n\n"
+        
+        if history:
+            text += f"<b>Riwayat Livestream Terakhir:</b>\n"
+            for idx, h in enumerate(history, 1):
+                start_time = h["start_time"]
+                end_time = h["end_time"] or "Masih berlangsung"
+                was_recorded = bool(h["was_recorded"])
+                recording_id = h["recording_id"]
+                
+                duration_str = ""
+                if h["end_time"]:
+                    start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                    end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+                    duration = end_dt - start_dt
+                    duration_str = f" ({format_duration(duration.seconds)})"
+                
+                text += f"{idx}. {start_time} s/d {end_time}{duration_str}\n"
+                if was_recorded:
+                    text += f"   ✅ Terekam (ID: {recording_id[:8] if recording_id else 'N/A'})\n"
+                
+                if idx < len(history):
+                    text += "\n"
+        
+        # Update message
+        await update.callback_query.message.edit_text(
+            text,
+            reply_markup=get_account_details_keyboard(account_id),
+            parse_mode=ParseMode.HTML
+        )
+        
+        # If now live and auto-record enabled, start recording
+        if is_live and auto_record and not notify_only and not current_recording_id:
+            # Show recording message
+            recording_message = await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⏳ <b>Akun {username} terdeteksi LIVE! Memulai Auto-Record...</b>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Start recording
+            if platform == "tiktok":
+                success, recording_id, result = await start_tiktok_recording(
+                    username, user_id, auto_record=True, account_id=account_id
+                )
+            else:
+                success, recording_id, result = await start_bigo_recording(
+                    username, user_id, auto_record=True, account_id=account_id
+                )
+                
+            if success:
+                await recording_message.edit_text(
+                    f"✅ <b>Auto-Record dimulai untuk {platform.upper()}: {username}</b>\n\n"
+                    f"ID: <code>{recording_id}</code>\n",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📋 Lihat Rekaman Aktif", callback_data="list_active")]
+                    ])
+                )
+            else:
+                await recording_message.edit_text(
+                    f"❌ <b>Gagal memulai Auto-Record untuk {platform.upper()}: {username}</b>\n\n"
+                    f"Error: {result}",
+                    parse_mode=ParseMode.HTML
+                )
+    
+    except Exception as e:
+        logger.error(f"Error in handle_check_now: {str(e)}")
+        await update.callback_query.message.edit_text(
+            f"❌ <b>Terjadi kesalahan:</b> {str(e)}",
+            reply_markup=get_account_details_keyboard(account_id),
+            parse_mode=ParseMode.HTML
+        )
+
+async def handle_test_record(update: Update, context: ContextTypes.DEFAULT_TYPE, account_id: int) -> None:
+    """Handler for testing recording (admin only)"""
+    try:
+        # Get account info
+        account = get_account_by_id(account_id)
+        if not account:
+            await update.callback_query.message.edit_text(
+                "❌ <b>Akun tidak ditemukan.</b>",
+                reply_markup=get_back_button(),
+                parse_mode=ParseMode.HTML
+            )
+            return
+            
+        user_id = account["user_id"]
+        
+        # Cek apakah user admin
+        if not is_admin(user_id):
+            await update.callback_query.message.edit_text(
+                "❌ <b>Hanya admin yang dapat melakukan test record.</b>",
+                reply_markup=get_account_details_keyboard(account_id),
+                parse_mode=ParseMode.HTML
+            )
+            return
+            
+        platform = account["platform"]
+        username = account["username"]
+        
+        # Update message
+        await update.callback_query.message.edit_text(
+            f"⏳ <b>Memulai test recording untuk {platform.upper()}: {username}...</b>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Force record
+        if platform == "tiktok":
+            # Persiapkan test file dengan ffmpeg untuk TikTok
+            current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_file = os.path.join(DOWNLOAD_PATH, f"tiktok_{username}_{current_time}_test.mp4")
+            
+            # Create test video file
+            import subprocess
+            cmd = [
+                "ffmpeg", 
+                "-f", "lavfi", 
+                "-i", "testsrc=duration=10:size=1280x720:rate=30",
+                "-f", "lavfi",
+                "-i", "anoisesrc=duration=10:amplitude=0.1",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                output_file
+            ]
+            
+            subprocess.run(cmd, check=True)
+            
+            # Create test recording entry
+            recording_id = str(uuid.uuid4())
+            start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Save to database
+            save_recording(
+                recording_id=recording_id,
+                user_id=user_id,
+                platform="tiktok",
+                target=f"@{username} (TEST)",
+                status="completed",
+                start_time=start_time,
+                end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                file_path=output_file,
+                file_size=get_file_size(output_file),
+                quality="HD (TEST)",
+                original_link=f"TEST:{username}"
+            )
+            
+            # Generate thumbnail
+            thumbnail = generate_thumbnail(output_file)
+            
+            # Send notification
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ <b>Test Recording Completed for {platform.upper()}: {username}</b>\n\n"
+                     f"ID: <code>{recording_id}</code>\n"
+                     f"File: <code>{os.path.basename(output_file)}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬇️ Download", callback_data=f"download_{recording_id}")],
+                    [InlineKeyboardButton("📋 Lihat Rekaman", callback_data=f"view_{recording_id}")]
+                ])
+            )
+            
+            # Send thumbnail if available
+            if thumbnail and os.path.exists(thumbnail):
+                with open(thumbnail, "rb") as photo:
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo,
+                        caption=f"Test recording thumbnail for {username}"
+                    )
+                    
+        else:  # bigo
+            # Similar test for Bigo
+            current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            output_file = os.path.join(DOWNLOAD_PATH, f"bigo_{username}_{current_time}_test.mp4")
+            
+            # Create test video file with different pattern
+            import subprocess
+            cmd = [
+                "ffmpeg", 
+                "-f", "lavfi", 
+                "-i", "mandelbrot=duration=10:size=1280x720:rate=30",
+                "-f", "lavfi",
+                "-i", "anoisesrc=duration=10:amplitude=0.1",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                output_file
+            ]
+            
+            subprocess.run(cmd, check=True)
+            
+            # Create test recording entry
+            recording_id = str(uuid.uuid4())
+            start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Save to database
+            save_recording(
+                recording_id=recording_id,
+                user_id=user_id,
+                platform="bigo",
+                target=f"{username} (TEST)",
+                status="completed",
+                start_time=start_time,
+                end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                file_path=output_file,
+                file_size=get_file_size(output_file),
+                quality="HD (TEST)",
+                original_link=f"TEST:{username}"
+            )
+            
+            # Generate thumbnail
+            thumbnail = generate_thumbnail(output_file)
+            
+            # Send notification
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ <b>Test Recording Completed for {platform.upper()}: {username}</b>\n\n"
+                     f"ID: <code>{recording_id}</code>\n"
+                     f"File: <code>{os.path.basename(output_file)}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬇️ Download", callback_data=f"download_{recording_id}")],
+                    [InlineKeyboardButton("📋 Lihat Rekaman", callback_data=f"view_{recording_id}")]
+                ])
+            )
+            
+            # Send thumbnail if available
+            if thumbnail and os.path.exists(thumbnail):
+                with open(thumbnail, "rb") as photo:
+                    await context.bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo,
+                        caption=f"Test recording thumbnail for {username}"
+                    )
+        
+        # Update message
+        await update.callback_query.message.edit_text(
+            f"✅ <b>Test recording selesai untuk {platform.upper()}: {username}</b>\n\n"
+            f"Silakan cek daftar rekaman untuk melihat hasilnya.",
+            reply_markup=get_account_details_keyboard(account_id),
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in handle_test_record: {str(e)}")
+        await update.callback_query.message.edit_text(
+            f"❌ <b>Terjadi kesalahan saat test recording:</b> {str(e)}",
+            reply_markup=get_account_details_keyboard(account_id),
+            parse_mode=ParseMode.HTML
+        )
+
+async def handle_refresh_live(update: Update, context: ContextTypes.DEFAULT_TYPE, account_id: int) -> None:
+    """Handler for refreshing live status"""
+    # Basically the same as check_now, but with different messaging
+    await handle_check_now(update, context, account_id)
+
 # ========== MAIN FUNCTION ==========
 
 def main() -> None:
@@ -3523,6 +4275,12 @@ def main() -> None:
         # Add message handler
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
         
+        # Try to recover any active recordings
+        try:
+            recover_active_recordings()
+        except Exception as e:
+            logger.error(f"Error recovering active recordings: {str(e)}")
+        
         # Start background tasks
         async def start_background_tasks():
             # Start notification processor
@@ -3541,13 +4299,75 @@ def main() -> None:
         # Log startup message
         logger.info("Bot started. Press Ctrl+C to stop.")
         
-        # Start the Bot
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Start the Bot with all updates
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            pool_timeout=30,
+            read_timeout=30,
+            write_timeout=30
+        )
     
     except Exception as e:
         logger.error(f"Error in main function: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         cleanup_on_shutdown()
         raise
+
+def recover_active_recordings():
+    """Try to recover any active recordings from database"""
+    logger.info("Attempting to recover active recordings...")
+    
+    # Get recordings with 'recording' status
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM recordings WHERE status = 'recording' OR status = 'processing' OR status = 'stopping'")
+    recordings = cursor.fetchall()
+    
+    conn.close()
+    
+    recovered = 0
+    
+    for recording in recordings:
+        recording_id = recording["id"]
+        user_id = recording["user_id"]
+        platform = recording["platform"]
+        target = recording["target"]
+        file_path = recording["file_path"]
+        
+        logger.info(f"Marking recording {recording_id} ({platform}: {target}) as 'interrupted'")
+        
+        # Update status to interrupted
+        update_recording_status(
+            recording_id=recording_id,
+            status="interrupted",
+            end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        
+        recovered += 1
+    
+    # Also check monitored accounts with active recordings
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM monitored_accounts WHERE current_recording_id IS NOT NULL")
+    accounts = cursor.fetchall()
+    
+    conn.close()
+    
+    for account in accounts:
+        account_id = account["id"]
+        current_recording_id = account["current_recording_id"]
+        
+        # Reset recording ID
+        update_account_recording_id(account_id, None)
+        logger.info(f"Reset current_recording_id for account {account_id}")
+    
+    logger.info(f"Recovery completed: {recovered} recordings marked as interrupted")
 
 if __name__ == "__main__":
     main()
