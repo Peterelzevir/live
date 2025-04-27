@@ -44,6 +44,9 @@ os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 # Database untuk menyimpan data pengguna dan job
 DB_PATH = "recorder_bot.db"
 
+#
+notification_queue = asyncio.Queue()
+
 # Status record
 active_recordings: Dict[str, Dict] = {}
 recording_processes: Dict[str, subprocess.Popen] = {}
@@ -433,15 +436,16 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
     output_file = os.path.join(DOWNLOAD_PATH, f"tiktok_{username}_{current_time}.mp4")
     
     # Prepare command to record using yt-dlp with HD quality
+    # Updated command for better TikTok compatibility
     cmd = [
         "yt-dlp",
         "--no-part",
         "--no-mtime",
         "--no-playlist",
-        "-f", TIKTOK_QUALITY, # Pilih kualitas terbaik
-        "--hls-use-mpegts",   # Gunakan format MPEG-TS untuk streaming yang lebih stabil
-        "--live-from-start",  # Rekam dari awal livestream
-        "--wait-for-video", "10", # Tunggu hingga 10 detik jika livestream belum dimulai
+        "-f", "best",  # Always use best quality
+        "--hls-use-mpegts",  # Use MPEG-TS for better streaming
+        "--live-from-start",  # Record from start of livestream
+        "--wait-for-video", "10",  # Wait up to 10 seconds for video
         "-o", output_file,
         target
     ]
@@ -454,6 +458,15 @@ async def start_tiktok_recording(username_or_url: str, user_id: int, auto_record
             stderr=subprocess.PIPE,
             text=True
         )
+        
+        # Check immediate failure (in case of invalid URL or not live)
+        try:
+            return_code = process.poll()
+            if return_code is not None and return_code != 0:
+                stderr = process.stderr.read() if process.stderr else "Unknown error"
+                return False, recording_id, f"Error: Stream tidak ditemukan atau tidak sedang live. {stderr}"
+        except:
+            pass  # Continue if there's no immediate error
         
         # Save to database
         start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -523,20 +536,21 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
     
     output_file = os.path.join(DOWNLOAD_PATH, f"bigo_{username}_{current_time}.mp4")
     
-    # Prepare command to record using streamlink dengan kualitas HD
+    # Prepare command to record using streamlink with HD quality
+    # Updated command for better Bigo compatibility
     cmd = [
         "streamlink",
         "--force",
         "--hls-live-restart",
-        "--hls-segment-threads", "3",  # Gunakan beberapa thread untuk download
-        "--hls-timeout", "180",        # Timeout lebih lama
+        "--hls-segment-threads", "3",
+        "--hls-timeout", "180",
         "--retry-streams", "5",
         "--retry-max", "10",
         "--retry-open", "5",
         "--stream-timeout", "120",
-        "--ringbuffer-size", "64M",     # Buffer besar untuk kualitas tinggi
+        "--ringbuffer-size", "64M",
         "-o", output_file,
-        target, BIGO_QUALITY            # Kualitas terbaik
+        target, "best"  # Always use best quality
     ]
     
     try:
@@ -547,6 +561,15 @@ async def start_bigo_recording(username_or_url: str, user_id: int, auto_record: 
             stderr=subprocess.PIPE,
             text=True
         )
+        
+        # Check immediate failure (in case of invalid URL or not live)
+        try:
+            return_code = process.poll()
+            if return_code is not None and return_code != 0:
+                stderr = process.stderr.read() if process.stderr else "Unknown error"
+                return False, recording_id, f"Error: Stream tidak ditemukan atau tidak sedang live. {stderr}"
+        except:
+            pass  # Continue if there's no immediate error
         
         # Save to database
         start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -643,13 +666,22 @@ def monitor_recording_process(recording_id: str, process: subprocess.Popen):
         if recording_id in recording_processes:
             del recording_processes[recording_id]
         
-        # Try to notify user that recording is complete
-        # Note: This is an async operation but we're in a non-async thread
-        # For a full implementation, you would need a proper async task management
-        asyncio.run_coroutine_threadsafe(
-            notify_recording_completed(recording_id, status), 
-            asyncio.get_event_loop()
-        )
+        # Instead of running asyncio directly, add a notification to the queue
+        # that will be processed by the main event loop
+        try:
+            # Create a dict with notification details
+            notification = {
+                "type": "recording_completed",
+                "recording_id": recording_id,
+                "status": status
+            }
+            
+            # Use the global notification_queue to send the notification
+            loop = asyncio.get_running_loop()
+            loop.call_soon_threadsafe(lambda: notification_queue.put_nowait(notification))
+        except RuntimeError:
+            # No running event loop, log the error but don't crash
+            logger.error(f"Could not queue notification for recording {recording_id} - no running loop")
 
 def compress_video(input_file: str) -> Optional[str]:
     """Compress video using FFmpeg with high quality"""
@@ -867,6 +899,7 @@ async def stop_recording(recording_id: str) -> bool:
         output_file = active_recordings[recording_id]["output_file"]
         file_size = get_file_size(output_file) if os.path.exists(output_file) else 0
         
+        # Update status in database
         update_recording_status(
             recording_id=recording_id,
             status="stopped",
@@ -875,9 +908,17 @@ async def stop_recording(recording_id: str) -> bool:
             file_size=file_size
         )
         
-        # Clean up
-        del active_recordings[recording_id]
-        del recording_processes[recording_id]
+        # Instead of cleaning up here, let the monitoring thread handle it
+        # Just mark it as manually stopped
+        active_recordings[recording_id]["manually_stopped"] = True
+        
+        # Add notification to queue for the stopped recording
+        notification = {
+            "type": "recording_completed",
+            "recording_id": recording_id,
+            "status": "stopped"
+        }
+        await notification_queue.put(notification)
         
         return True
     
@@ -2420,8 +2461,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reply_markup=get_main_menu_keyboard()
             )
 
+#
+async def process_notifications():
+    """Process notifications from the queue"""
+    while True:
+        try:
+            # Get a notification from the queue
+            notification = await notification_queue.get()
+            
+            # Handle different notification types
+            if notification["type"] == "recording_completed":
+                recording_id = notification["recording_id"]
+                status = notification["status"]
+                await notify_recording_completed(recording_id, status)
+            
+            # Mark task as done
+            notification_queue.task_done()
+        except Exception as e:
+            logger.error(f"Error processing notification: {str(e)}")
+        
+        # Small delay to avoid CPU spinning
+        await asyncio.sleep(0.1)
+
 # ========== MAIN FUNCTION ==========
 
+# Update the main function to start the notification processor
 def main() -> None:
     """Start the bot"""
     # Initialize database
@@ -2446,13 +2510,16 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
     # Start account monitoring in background
-    async def start_monitoring():
-        await run_account_monitor()
+    async def start_background_tasks():
+        # Start notification processor
+        asyncio.create_task(process_notifications())
+        # Start account monitor
+        asyncio.create_task(run_account_monitor())
     
-    # Schedule the account monitor to run in the background
+    # Schedule the background tasks to run
     application.job_queue.run_once(
-        lambda context: asyncio.create_task(start_monitoring()), 
-        when=10  # Start monitoring after 10 seconds
+        lambda context: asyncio.create_task(start_background_tasks()), 
+        when=5  # Start after 5 seconds
     )
     
     # Log startup message
