@@ -26,8 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Ganti dengan token bot Anda
-ADMIN_IDS = [12345678]  # Ganti dengan ID admin Anda
+TOKEN = "7839177497:AAFS7PtzQFXmaMkucUUgbdT5SjmEiWAJVRQ"  # Ganti dengan token bot Anda
+ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Anda
 DOWNLOAD_PATH = "downloads/"  # Folder untuk menyimpan hasil rekaman
 
 # Konfigurasi kualitas dan kompresi
