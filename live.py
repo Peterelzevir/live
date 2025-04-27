@@ -1439,6 +1439,16 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode=ParseMode.HTML
         )
     
+    # Toggle compression
+    elif query.data == "toggle_compression":
+        COMPRESSION_ENABLED = not COMPRESSION_ENABLED
+        
+        await query.message.edit_text(
+            f"✅ Kompresi video {'diaktifkan' if COMPRESSION_ENABLED else 'dinonaktifkan'}.\n\n"
+            f"Kompresi akan {'mengompres' if COMPRESSION_ENABLED else 'tidak mengompres'} video yang lebih besar dari {format_size(COMPRESSION_THRESHOLD)} secara otomatis untuk menghemat ruang penyimpanan tanpa mengurangi kualitas visual secara signifikan.",
+            reply_markup=get_settings_keyboard()
+        )
+    
     # Info
     elif query.data == "info":
         info_text = (
