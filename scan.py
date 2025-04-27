@@ -1558,7 +1558,7 @@ async def process_vcf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         del PROCESSING_STATUS[chat_id]
 
 async def update_progress_message(context, chat_id, progress, status_text):
-    """Memperbarui pesan progress."""
+    """Memperbarui pesan progress dengan tombol cancel."""
     if chat_id not in PROCESSING_STATUS:
         return
     
@@ -1574,6 +1574,12 @@ async def update_progress_message(context, chat_id, progress, status_text):
     # Perbarui pesan
     banner = BANNER % (EMOJI['loading'], EMOJI['loading'], EMOJI['search'], EMOJI['search'])
     
+    # Tambahkan tombol cancel
+    keyboard = [
+        [InlineKeyboardButton(f"{EMOJI['trash']} Batalkan Proses", callback_data="cancel_process")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     try:
         await context.bot.edit_message_text(
             chat_id=int(chat_id),
@@ -1584,7 +1590,8 @@ async def update_progress_message(context, chat_id, progress, status_text):
                 f"Status: {format_text(status_text, 'italic')}\n"
                 f"{loading_pattern}"
             ),
-            parse_mode=constants.ParseMode.HTML
+            parse_mode=constants.ParseMode.HTML,
+            reply_markup=reply_markup if PROCESSING_STATUS[chat_id].get('can_cancel', False) else None
         )
     except Exception as e:
         logger.error(f"❌ Error memperbarui pesan progress: {e}")
@@ -1623,22 +1630,20 @@ def extract_phone_numbers(vcf_content):
             
             # Sanitasi nomor telepon dan tambahkan ke hasil
             for phone in phone_numbers:
-                # Membersihkan nomor telepon dari karakter non-digit
-                clean_number = re.sub(r'\D', '', phone)
+                # Membersihkan nomor telepon dari karakter non-digit kecuali tanda +
+                clean_number = re.sub(r'[^\d+]', '', phone)
                 
-                # Jika nomor tidak dimulai dengan +, tambahkan +
+                # Tambahkan + jika belum ada
                 if not clean_number.startswith('+'):
-                    if clean_number.startswith('0'):
-                        # Asumsi nomor Indonesia, ganti 0 dengan kode negara +62
-                        clean_number = '+62' + clean_number[1:]
-                    else:
-                        clean_number = '+' + clean_number
+                    clean_number = '+' + clean_number
                 
-                phone_data.append({
-                    'name': name,
-                    'phone': clean_number,
-                    'original_vcard': vcard
-                })
+                # Verifikasi nomor memiliki format yang valid (minimal +XX)
+                if len(clean_number) > 3:  # Minimal +XX
+                    phone_data.append({
+                        'name': name,
+                        'phone': clean_number,
+                        'original_vcard': vcard
+                    })
         except Exception as e:
             logger.error(f"❌ Error parsing vCard: {e}")
             continue
@@ -1650,7 +1655,21 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
     results = []
     total_numbers = len(phone_data)
     
+    # Tambahkan flag untuk mengontrol pembatalan
+    PROCESSING_STATUS[chat_id] = {
+        'message_id': PROCESSING_STATUS[chat_id]['message_id'],
+        'step': PROCESSING_STATUS[chat_id]['step'],
+        'total_steps': PROCESSING_STATUS[chat_id]['total_steps'],
+        'cancelled': PROCESSING_STATUS[chat_id].get('cancelled', False),
+        'can_cancel': True
+    }
+    
     for i, data in enumerate(phone_data):
+        # Cek apakah proses dibatalkan
+        if chat_id in PROCESSING_STATUS and PROCESSING_STATUS[chat_id].get('cancelled', False):
+            logger.info(f"⚠️ Proses dibatalkan oleh pengguna untuk chat {chat_id}")
+            break
+            
         phone = data['phone']
         name = data['name']
         original_vcard = data['original_vcard']
@@ -1664,8 +1683,10 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
             f"Memeriksa {i+1}/{total_numbers}: {name} ({phone})"
         )
         
+        logger.info(f"🔍 Memeriksa nomor: {phone} ({name})")
+        
         try:
-            # Membuat InputPhoneContact untuk diimpor
+            # Coba metode 1: dengan format asli
             contact = InputPhoneContact(
                 client_id=0,
                 phone=phone,
@@ -1673,13 +1694,29 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
                 last_name=""
             )
             
-            # Mengimpor kontak
-            logger.info(f"🔍 Memeriksa nomor: {phone} ({name})")
             imported = await client(ImportContactsRequest([contact]))
+            user_found = imported.users
+            
+            # Jika tidak ditemukan, coba metode 2: dengan format tanpa +
+            if not user_found and phone.startswith('+'):
+                alt_phone = phone[1:]  # Hapus tanda +
+                contact_alt = InputPhoneContact(
+                    client_id=0,
+                    phone=alt_phone,
+                    first_name=name,
+                    last_name=""
+                )
+                
+                imported_alt = await client(ImportContactsRequest([contact_alt]))
+                user_found = imported_alt.users
+                
+                # Hapus kontak alternatif yang diimpor
+                if user_found:
+                    await client(functions.contacts.DeleteContactsRequest(id=[user.id for user in user_found]))
             
             # Jika user ditemukan
-            if imported.users:
-                user = imported.users[0]
+            if user_found:
+                user = user_found[0]
                 
                 # Mendapatkan informasi lengkap tentang user
                 try:
@@ -1783,7 +1820,7 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
             
             # Menghapus kontak yang baru diimpor
             if imported.users:
-                await client(functions.contacts.DeleteContactsRequest(id=[user.id]))
+                await client(functions.contacts.DeleteContactsRequest(id=[user.id for user in imported.users]))
             
             # Delay untuk menghindari rate limiting
             await asyncio.sleep(delay)
@@ -1838,62 +1875,9 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
             if e.seconds > 0:
                 await asyncio.sleep(e.seconds)
             
-            # Try again with the same contact
-            try:
-                # Membuat InputPhoneContact untuk diimpor
-                contact = InputPhoneContact(
-                    client_id=0,
-                    phone=phone,
-                    first_name=name,
-                    last_name=""
-                )
-                
-                imported = await client(ImportContactsRequest([contact]))
-                
-                # Process like before
-                if imported.users:
-                    user = imported.users[0]
-                    
-                    # Menyimpan hasil (simplified)
-                    results.append({
-                        'name': name,
-                        'phone': phone,
-                        'registered': True,
-                        'original_vcard': original_vcard,
-                        'sent_to_group': False,  # Don't try to send again
-                        'send_error': "Rate limit exceeded, switched account",
-                        'telegram_info': {
-                            'id': user.id,
-                            'username': user.username if user.username else "Tidak ada",
-                            'first_name': user.first_name if user.first_name else "Tidak ada",
-                            'last_name': user.last_name if user.last_name else "Tidak ada",
-                            'last_seen': "Tidak tersedia",
-                            'bio': "Tidak tersedia",
-                            'profile_photo': user.photo is not None,
-                            'is_bot': False,
-                            'is_premium': False,
-                        }
-                    })
-                    
-                    # Menghapus kontak
-                    await client(functions.contacts.DeleteContactsRequest(id=[user.id]))
-                else:
-                    results.append({
-                        'name': name,
-                        'phone': phone,
-                        'registered': False,
-                        'original_vcard': original_vcard,
-                        'sent_to_group': False,
-                    })
-            except Exception as e:
-                logger.error(f"❌ Error memeriksa nomor setelah FloodWaitError: {e}")
-                results.append({
-                    'name': name,
-                    'phone': phone,
-                    'registered': False,
-                    'original_vcard': original_vcard,
-                    'sent_to_group': False,
-                })
+            # Try again with the same contact (don't add to results yet)
+            i -= 1  # Decrement counter to retry this contact
+            continue
             
         except errors.AuthKeyUnregisteredError:
             logger.error(f"❌ Auth key akun kedaluwarsa, beralih ke akun lain...")
@@ -1924,15 +1908,9 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
                 # Try next account
                 continue
             
-            # Add contact to results as failed
-            results.append({
-                'name': name,
-                'phone': phone,
-                'registered': False,
-                'original_vcard': original_vcard,
-                'sent_to_group': False,
-                'send_error': "Auth key expired, switched account",
-            })
+            # Try again with the same contact (don't add to results yet)
+            i -= 1  # Decrement counter to retry this contact
+            continue
             
         except Exception as e:
             logger.error(f"❌ Error memeriksa nomor {phone}: {e}")
@@ -1952,6 +1930,36 @@ async def check_telegram_accounts_and_send(client, phone_data, chat_id, context,
         pass
     
     return results
+
+async def cancel_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Membatalkan proses pemeriksaan VCF yang sedang berjalan."""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = str(update.effective_chat.id)
+    
+    if chat_id in PROCESSING_STATUS:
+        PROCESSING_STATUS[chat_id]['cancelled'] = True
+        
+        # Update pesan progres
+        banner = BANNER % (EMOJI['warning'], EMOJI['warning'], EMOJI['trash'], EMOJI['trash'])
+        
+        await query.edit_message_text(
+            f"{banner}\n\n"
+            f"{EMOJI['trash']} {format_text('PROSES DIBATALKAN', 'bold')}\n\n"
+            f"Status: {format_text('Membatalkan proses pemeriksaan...', 'italic')}\n"
+            f"Harap tunggu hingga proses saat ini selesai dibatalkan.",
+            parse_mode=constants.ParseMode.HTML
+        )
+        
+        logger.info(f"🚫 Proses dibatalkan oleh pengguna untuk chat {chat_id}")
+    else:
+        # Jika tidak ada proses yang sedang berjalan
+        await query.edit_message_text(
+            f"{EMOJI['warning']} {format_text('TIDAK ADA PROSES', 'bold')}\n\n"
+            f"Tidak ada proses pemeriksaan yang sedang berjalan.",
+            parse_mode=constants.ParseMode.HTML
+        )
 
 @admin_only
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2327,6 +2335,11 @@ def main() -> None:
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("addadmin", add_admin_command))
     application.add_handler(CommandHandler("removeadmin", remove_admin_command))
+    application.add_handler(CommandHandler("accounts", account_menu))
+    application.add_handler(CommandHandler("groups", group_menu))
+    
+    # Menambahkan handler untuk cancel process
+    application.add_handler(CallbackQueryHandler(cancel_process, pattern="^cancel_process$"))
     
     # Conversation handler untuk setup akun
     account_setup_handler = ConversationHandler(
@@ -2366,11 +2379,12 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Document.FileExtension("vcf"), process_vcf))
     
     # Handler untuk callback dari tombol inline
+    # Pastikan callback handler ini diletakkan terakhir agar tidak conflict dengan handler lain
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # Menjalankan bot
     logger.info("✅ Bot berjalan! Siap untuk melayani permintaan.")
-    application.run_polling()
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
