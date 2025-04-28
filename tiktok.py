@@ -18,9 +18,9 @@ from telegram.ext import (
     filters,
 )
 
-# Library untuk mengakses TikTok Live
-from TikTokLive.client.client import TikTokLiveClient
-from TikTokLive.types import ConnectEvent, DisconnectEvent, LiveEndEvent
+# Menggunakan TikTok-Live-Connector sebagai alternatif
+from tiktok_live_connector import TikTokLiveClient
+from tiktok_live_connector.events import ConnectedEvent, DisconnectedEvent, LiveEndedEvent
 
 # Konfigurasi logging
 logging.basicConfig(
@@ -29,8 +29,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Ganti dengan token bot Anda
-ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Telegram Anda
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Ganti dengan token bot Anda
+ADMIN_IDS = [123456789]  # Ganti dengan ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 
@@ -162,11 +162,11 @@ class TikTokMonitor:
             self.stop_monitoring_account(username)
             
             # Buat TikTok live client baru
-            client = TikTokLiveClient(username=username)
+            client = TikTokLiveClient(username)
             
             # Register event handlers
             @client.on("connect")
-            async def on_connect(_: ConnectEvent):
+            async def on_connect(_):
                 logger.info(f"Terhubung ke livestream {username}!")
                 # Notifikasi admin
                 await self.notify_admins(f"🟢 <b>{username}</b> sedang LIVE! Rekaman dimulai otomatis.")
@@ -174,11 +174,11 @@ class TikTokMonitor:
                 self.start_recording(username)
             
             @client.on("disconnect")
-            async def on_disconnect(_: DisconnectEvent):
+            async def on_disconnect(_):
                 logger.info(f"Terputus dari livestream {username}!")
             
             @client.on("live_end")
-            async def on_live_end(_: LiveEndEvent):
+            async def on_live_end(_):
                 logger.info(f"Livestream {username} berakhir!")
                 # Notifikasi admin
                 await self.notify_admins(f"🔴 Livestream <b>{username}</b> telah berakhir. Rekaman selesai.")
@@ -217,7 +217,7 @@ class TikTokMonitor:
             try:
                 # Hentikan client
                 client = self.active_monitors[username]
-                asyncio.run_coroutine_threadsafe(client.stop(), asyncio.get_event_loop())
+                client.stop()  # API berbeda dengan library alternatif
                 # Hapus dari daftar monitor aktif
                 del self.active_monitors[username]
                 logger.info(f"Berhenti memantau {username}")
@@ -260,7 +260,6 @@ class TikTokMonitor:
                 bitrate = "1000k"
             
             # Gunakan ffmpeg untuk merekam livestream
-            # URL livestream didapatkan dari TikTok API melalui library TikTokLive
             tiktok_url = f"https://www.tiktok.com/@{username}/live"
             
             # Jalankan proses rekaman menggunakan yt-dlp dan ffmpeg
