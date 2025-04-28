@@ -19,8 +19,8 @@ from telegram.ext import (
 )
 
 # Library untuk mengakses TikTok Live
-from TikTokLive.client import TikTokLiveClient
-from TikTokLive.types.events import ConnectEvent, DisconnectEvent, LiveEndEvent
+from TikTokLive.client.client import TikTokLiveClient
+from TikTokLive.types import ConnectEvent, DisconnectEvent, LiveEndEvent
 
 # Konfigurasi logging
 logging.basicConfig(
