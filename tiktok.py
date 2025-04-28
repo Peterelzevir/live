@@ -5,6 +5,7 @@ import time
 import asyncio
 import subprocess
 import threading
+import queue
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -25,8 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Ganti dengan token bot Anda
-ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Telegram Anda
+TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Token bot Anda
+ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 CHECK_INTERVAL = 60  # Interval pengecekan dalam detik (1 menit)
@@ -83,18 +84,22 @@ def init_database():
 
 # Class untuk mengelola monitor dan rekaman TikTok
 class TikTokMonitor:
-    def __init__(self, bot):
-        self.bot = bot
+    def __init__(self, app):
+        self.app = app
         self.active_recordings: Dict[str, dict] = {}
         self.recording_processes: Dict[str, subprocess.Popen] = {}
         self.stop_event = threading.Event()
         self.monitor_thread = None
-    
-    async def initialize(self):
+        self.notification_queue = queue.Queue()
+        
+    def initialize(self):
         """Inisialisasi dan mulai memantau semua akun yang tersimpan di database."""
         # Mulai thread monitoring
         self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.monitor_thread.start()
+        
+        # Mulai task untuk memproses notifikasi
+        asyncio.create_task(self._process_notifications())
         
         accounts = self.get_monitored_accounts()
         logger.info(f"Initialized monitoring for {len(accounts)} accounts")
@@ -169,26 +174,22 @@ class TikTokMonitor:
                         
                         # Jika sedang live dan belum merekam, mulai rekaman
                         if is_live and username not in self.recording_processes:
-                            # Kirim notifikasi ke semua admin melalui asyncio
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(
-                                self.notify_admins(f"🟢 <b>{username}</b> sedang LIVE! Rekaman dimulai otomatis.")
-                            )
-                            loop.close()
+                            # Tambahkan notifikasi ke queue
+                            self.notification_queue.put({
+                                "type": "live_start",
+                                "username": username
+                            })
                             
                             # Mulai merekam
                             self.start_recording(username)
                         
                         # Jika tidak live tapi masih merekam, hentikan rekaman
                         elif not is_live and username in self.recording_processes:
-                            # Kirim notifikasi ke semua admin melalui asyncio
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            loop.run_until_complete(
-                                self.notify_admins(f"🔴 Livestream <b>{username}</b> telah berakhir. Rekaman selesai.")
-                            )
-                            loop.close()
+                            # Tambahkan notifikasi ke queue
+                            self.notification_queue.put({
+                                "type": "live_end",
+                                "username": username
+                            })
                             
                             # Hentikan rekaman
                             self.stop_recording(username)
@@ -202,6 +203,29 @@ class TikTokMonitor:
             except Exception as e:
                 logger.error(f"Error dalam monitoring loop: {e}")
                 time.sleep(10)  # Tunggu sebentar sebelum mencoba lagi
+    
+    async def _process_notifications(self):
+        """Proses notifikasi dari queue dan kirim ke admin."""
+        while True:
+            try:
+                # Periksa queue untuk notifikasi (non-blocking)
+                if not self.notification_queue.empty():
+                    notification = self.notification_queue.get_nowait()
+                    
+                    if notification["type"] == "live_start":
+                        await self.notify_admins(f"🟢 <b>{notification['username']}</b> sedang LIVE! Rekaman dimulai otomatis.")
+                    
+                    elif notification["type"] == "live_end":
+                        await self.notify_admins(f"🔴 Livestream <b>{notification['username']}</b> telah berakhir. Rekaman selesai.")
+                
+                # Tunggu sebentar sebelum memeriksa lagi
+                await asyncio.sleep(1)
+                
+            except queue.Empty:
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error memproses notifikasi: {e}")
+                await asyncio.sleep(5)
     
     def _check_if_live(self, username: str) -> bool:
         """Cek apakah akun TikTok sedang live menggunakan yt-dlp."""
@@ -341,7 +365,7 @@ class TikTokMonitor:
         """Kirim notifikasi ke semua admin."""
         for admin_id in ADMIN_IDS:
             try:
-                await self.bot.send_message(
+                await self.app.bot.send_message(
                     chat_id=admin_id,
                     text=message,
                     parse_mode="HTML"
@@ -769,8 +793,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-async def _async_main():
-    """Async main function to run the bot."""
+async def main():
+    """Fungsi utama untuk menjalankan bot."""
     # Inisialisasi database
     init_database()
     
@@ -787,10 +811,6 @@ async def _async_main():
     # Inisialisasi aplikasi bot Telegram
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Inisialisasi TikTok monitor
-    monitor = TikTokMonitor(application.bot)
-    application.bot_data["monitor"] = monitor
-    
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
     
@@ -803,19 +823,27 @@ async def _async_main():
     # Register error handler
     application.add_error_handler(error_handler)
     
-    # Initialize monitor
-    await monitor.initialize()
+    # Inisialisasi TikTok monitor
+    monitor = TikTokMonitor(application)
+    application.bot_data["monitor"] = monitor
+    
+    # Mulai aplikasi
+    await application.initialize()
+    
+    # Inisialisasi monitor setelah aplikasi diinisialisasi
+    monitor.initialize()
     
     try:
-        # Run the bot using polling
-        await application.run_polling()
+        # Jalankan polling aplikasi
+        await application.start()
+        await application.updater.start_polling()
+        
+        # Berjalan sampai dihentikan
+        await application.updater.idle()
     finally:
-        # Ensure monitoring is properly stopped when the bot stops
+        # Hentikan aplikasi dan monitor
         monitor.stop_monitoring()
-
-def main():
-    """Fungsi utama untuk menjalankan bot."""
-    asyncio.run(_async_main())
+        await application.stop()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
