@@ -456,6 +456,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk callback button."""
+    global CHECK_INTERVAL  # Deklarasi global di awal fungsi
+    
     query = update.callback_query
     user_id = query.from_user.id
     
@@ -705,7 +707,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seconds = int(action.replace("set_interval_", ""))
         
         # Ubah interval global
-        global CHECK_INTERVAL
         CHECK_INTERVAL = seconds
         
         conn = sqlite3.connect(DB_FILE)
@@ -774,12 +775,12 @@ def main():
     init_database()
     
     # Load saved interval if exists
+    global CHECK_INTERVAL
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = 'check_interval'")
     result = cursor.fetchone()
     if result:
-        global CHECK_INTERVAL
         CHECK_INTERVAL = int(result[0])
     conn.close()
     
