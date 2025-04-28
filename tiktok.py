@@ -29,8 +29,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # Ganti dengan token bot Anda
-ADMIN_IDS = [123456789]  # Ganti dengan ID admin Telegram Anda
+TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Ganti dengan token bot Anda
+ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 
