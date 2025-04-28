@@ -18,10 +18,6 @@ from telegram.ext import (
     filters,
 )
 
-# Menggunakan TikTok-Live-Connector sebagai alternatif
-from tiktok_live_connector import TikTokLiveClient
-from tiktok_live_connector.events import ConnectedEvent, DisconnectedEvent, LiveEndedEvent
-
 # Konfigurasi logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -33,6 +29,7 @@ TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Ganti d
 ADMIN_IDS = [5988451717]  # Ganti dengan ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
+CHECK_INTERVAL = 60  # Interval pengecekan dalam detik (1 menit)
 
 # Buat direktori rekaman jika belum ada
 os.makedirs(RECORDING_DIR, exist_ok=True)
@@ -88,15 +85,18 @@ def init_database():
 class TikTokMonitor:
     def __init__(self, bot):
         self.bot = bot
-        self.active_monitors: Dict[str, TikTokLiveClient] = {}
         self.active_recordings: Dict[str, dict] = {}
         self.recording_processes: Dict[str, subprocess.Popen] = {}
+        self.stop_event = threading.Event()
+        self.monitor_thread = None
     
     async def initialize(self):
         """Inisialisasi dan mulai memantau semua akun yang tersimpan di database."""
+        # Mulai thread monitoring
+        self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self.monitor_thread.start()
+        
         accounts = self.get_monitored_accounts()
-        for username in accounts:
-            self.start_monitoring_account(username)
         logger.info(f"Initialized monitoring for {len(accounts)} accounts")
     
     def get_monitored_accounts(self) -> List[str]:
@@ -127,8 +127,7 @@ class TikTokMonitor:
             conn.commit()
             conn.close()
             
-            # Mulai memantau akun ini
-            self.start_monitoring_account(username)
+            logger.info(f"Added account {username} to monitoring list")
             return True
         except Exception as e:
             logger.error(f"Error menambahkan akun {username}: {e}")
@@ -137,14 +136,17 @@ class TikTokMonitor:
     def remove_account(self, username: str) -> bool:
         """Hapus akun TikTok dari daftar pantauan."""
         try:
+            # Hentikan rekaman jika ada
+            if username in self.recording_processes:
+                self.stop_recording(username)
+            
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
             cursor.execute("DELETE FROM monitored_accounts WHERE username = ?", (username,))
             conn.commit()
             conn.close()
             
-            # Hentikan pemantauan akun ini
-            self.stop_monitoring_account(username)
+            logger.info(f"Removed account {username} from monitoring list")
             return True
         except Exception as e:
             logger.error(f"Error menghapus akun {username}: {e}")
@@ -152,77 +154,98 @@ class TikTokMonitor:
     
     def _validate_tiktok_username(self, username: str) -> bool:
         """Validasi apakah username TikTok valid."""
-        # Ini implementasi sederhana, dalam aplikasi nyata perlu validasi lebih lengkap
+        # Validasi sederhana
         return username and len(username) >= 2
     
-    def start_monitoring_account(self, username: str):
-        """Mulai memantau akun TikTok untuk livestream."""
-        try:
-            # Hentikan pemantauan yang sudah ada jika ada
-            self.stop_monitoring_account(username)
-            
-            # Buat TikTok live client baru
-            client = TikTokLiveClient(username)
-            
-            # Register event handlers
-            @client.on("connect")
-            async def on_connect(_):
-                logger.info(f"Terhubung ke livestream {username}!")
-                # Notifikasi admin
-                await self.notify_admins(f"🟢 <b>{username}</b> sedang LIVE! Rekaman dimulai otomatis.")
-                # Mulai merekam
-                self.start_recording(username)
-            
-            @client.on("disconnect")
-            async def on_disconnect(_):
-                logger.info(f"Terputus dari livestream {username}!")
-            
-            @client.on("live_end")
-            async def on_live_end(_):
-                logger.info(f"Livestream {username} berakhir!")
-                # Notifikasi admin
-                await self.notify_admins(f"🔴 Livestream <b>{username}</b> telah berakhir. Rekaman selesai.")
-                # Hentikan rekaman
-                self.stop_recording(username)
-            
-            # Jalankan client di thread terpisah
-            threading.Thread(
-                target=self._run_client,
-                args=(client,),
-                daemon=True
-            ).start()
-            
-            # Simpan instance client
-            self.active_monitors[username] = client
-            
-            logger.info(f"Mulai memantau {username} untuk livestream")
-        except Exception as e:
-            logger.error(f"Error memulai pantauan {username}: {e}")
-    
-    def _run_client(self, client):
-        """Jalankan client TikTok live di loop asyncio."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            loop.run_until_complete(client.start())
-        except Exception as e:
-            logger.error(f"Error menjalankan client TikTok: {e}")
-        finally:
-            loop.close()
-    
-    def stop_monitoring_account(self, username: str):
-        """Hentikan pemantauan akun TikTok."""
-        if username in self.active_monitors:
+    def _monitoring_loop(self):
+        """Loop untuk memantau akun TikTok secara berkala."""
+        while not self.stop_event.is_set():
             try:
-                # Hentikan client
-                client = self.active_monitors[username]
-                client.stop()  # API berbeda dengan library alternatif
-                # Hapus dari daftar monitor aktif
-                del self.active_monitors[username]
-                logger.info(f"Berhenti memantau {username}")
+                accounts = self.get_monitored_accounts()
+                for username in accounts:
+                    try:
+                        # Cek status live
+                        is_live = self._check_if_live(username)
+                        
+                        # Jika sedang live dan belum merekam, mulai rekaman
+                        if is_live and username not in self.recording_processes:
+                            # Kirim notifikasi ke semua admin melalui asyncio
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(
+                                self.notify_admins(f"🟢 <b>{username}</b> sedang LIVE! Rekaman dimulai otomatis.")
+                            )
+                            loop.close()
+                            
+                            # Mulai merekam
+                            self.start_recording(username)
+                        
+                        # Jika tidak live tapi masih merekam, hentikan rekaman
+                        elif not is_live and username in self.recording_processes:
+                            # Kirim notifikasi ke semua admin melalui asyncio
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(
+                                self.notify_admins(f"🔴 Livestream <b>{username}</b> telah berakhir. Rekaman selesai.")
+                            )
+                            loop.close()
+                            
+                            # Hentikan rekaman
+                            self.stop_recording(username)
+                    
+                    except Exception as e:
+                        logger.error(f"Error memantau akun {username}: {e}")
+                
+                # Tunggu interval sebelum memeriksa kembali
+                time.sleep(CHECK_INTERVAL)
+            
             except Exception as e:
-                logger.error(f"Error menghentikan pantauan {username}: {e}")
+                logger.error(f"Error dalam monitoring loop: {e}")
+                time.sleep(10)  # Tunggu sebentar sebelum mencoba lagi
+    
+    def _check_if_live(self, username: str) -> bool:
+        """Cek apakah akun TikTok sedang live menggunakan yt-dlp."""
+        try:
+            # Format URL TikTok Live
+            tiktok_url = f"https://www.tiktok.com/@{username}/live"
+            
+            # Gunakan yt-dlp untuk memeriksa status live
+            cmd = [
+                "yt-dlp", 
+                "--no-check-certificate",
+                "--skip-download",
+                "--print", "title",
+                tiktok_url
+            ]
+            
+            # Jalankan perintah dengan timeout
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            try:
+                stdout, stderr = process.communicate(timeout=30)
+                
+                # Jika proses keluar dengan kode 0 dan stdout tidak kosong, user sedang live
+                if process.returncode == 0 and stdout.strip():
+                    logger.info(f"Account {username} is LIVE: {stdout.strip()}")
+                    return True
+                
+                # Jika error atau tidak ada output, user tidak sedang live
+                logger.debug(f"Account {username} is NOT live")
+                return False
+            
+            except subprocess.TimeoutExpired:
+                process.kill()
+                logger.warning(f"Timeout checking if {username} is live")
+                return False
+        
+        except Exception as e:
+            logger.error(f"Error checking if {username} is live: {e}")
+            return False
     
     def start_recording(self, username: str):
         """Mulai merekam livestream TikTok."""
@@ -248,21 +271,10 @@ class TikTokMonitor:
             conn.commit()
             conn.close()
             
-            # Tentukan parameter kualitas berdasarkan setting
-            if quality == "1080p":
-                resolution = "1920x1080"
-                bitrate = "4000k"
-            elif quality == "720p":
-                resolution = "1280x720"
-                bitrate = "2500k"
-            else:  # 480p
-                resolution = "854x480"
-                bitrate = "1000k"
-            
-            # Gunakan ffmpeg untuk merekam livestream
+            # Format URL TikTok Live
             tiktok_url = f"https://www.tiktok.com/@{username}/live"
             
-            # Jalankan proses rekaman menggunakan yt-dlp dan ffmpeg
+            # Jalankan proses rekaman menggunakan yt-dlp
             cmd = [
                 "yt-dlp", 
                 "--no-check-certificate",
@@ -287,7 +299,7 @@ class TikTokMonitor:
                 "quality": quality
             }
             
-            logger.info(f"Mulai merekam livestream {username} dengan kualitas {quality}")
+            logger.info(f"Started recording livestream {username} with quality {quality}")
         except Exception as e:
             logger.error(f"Error memulai rekaman {username}: {e}")
     
@@ -295,7 +307,7 @@ class TikTokMonitor:
         """Hentikan rekaman livestream TikTok."""
         if username in self.recording_processes:
             try:
-                # Hentikan proses ffmpeg
+                # Hentikan proses rekaman
                 process = self.recording_processes[username]
                 process.terminate()
                 try:
@@ -321,7 +333,7 @@ class TikTokMonitor:
                 # Hapus dari daftar proses rekaman
                 del self.recording_processes[username]
                 
-                logger.info(f"Berhenti merekam livestream {username}")
+                logger.info(f"Stopped recording livestream {username}")
             except Exception as e:
                 logger.error(f"Error menghentikan rekaman {username}: {e}")
     
@@ -399,6 +411,16 @@ class TikTokMonitor:
         except Exception as e:
             logger.error(f"Error mendapatkan file rekaman {recording_id}: {e}")
             return None
+    
+    def stop_monitoring(self):
+        """Hentikan seluruh pemantauan."""
+        self.stop_event.set()
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=10)
+        
+        # Hentikan semua rekaman yang masih berjalan
+        for username in list(self.recording_processes.keys()):
+            self.stop_recording(username)
 
 # Command handler bot Telegram
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -647,6 +669,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("720p", callback_data="set_quality_720p"),
                 InlineKeyboardButton("1080p", callback_data="set_quality_1080p"),
             ],
+            [
+                InlineKeyboardButton("Interval: 1m", callback_data="set_interval_60"),
+                InlineKeyboardButton("Interval: 2m", callback_data="set_interval_120"),
+                InlineKeyboardButton("Interval: 5m", callback_data="set_interval_300"),
+            ],
             [InlineKeyboardButton("🔙 Kembali", callback_data="back_to_main")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -654,7 +681,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"⚙️ Pengaturan\n\n"
             f"Kualitas Rekaman Saat Ini: {quality}\n"
-            f"Pilih kualitas rekaman baru:",
+            f"Interval Pengecekan: {CHECK_INTERVAL} detik\n\n"
+            f"Pilih pengaturan yang ingin diubah:",
             reply_markup=reply_markup
         )
     
@@ -672,6 +700,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Gagal mengubah kualitas rekaman.\n\n"
                 "Kembali ke menu utama: /start"
             )
+    
+    elif action.startswith("set_interval_"):
+        seconds = int(action.replace("set_interval_", ""))
+        
+        # Ubah interval global
+        global CHECK_INTERVAL
+        CHECK_INTERVAL = seconds
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("check_interval", str(seconds))
+        )
+        conn.commit()
+        conn.close()
+        
+        await query.edit_message_text(
+            f"✅ Interval pengecekan berhasil diubah menjadi {seconds} detik.\n\n"
+            "Kembali ke menu utama: /start"
+        )
     
     elif action == "back_to_main":
         # Kembali ke menu utama
@@ -724,6 +773,16 @@ def main():
     # Inisialisasi database
     init_database()
     
+    # Load saved interval if exists
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = 'check_interval'")
+    result = cursor.fetchone()
+    if result:
+        global CHECK_INTERVAL
+        CHECK_INTERVAL = int(result[0])
+    conn.close()
+    
     # Inisialisasi aplikasi bot Telegram
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -743,11 +802,15 @@ def main():
     # Register error handler
     application.add_error_handler(error_handler)
     
-    # Jalankan bot
-    application.run_polling()
-    
-    # Inisialisasi monitor setelah bot berjalan
+    # Inisialisasi monitor
     asyncio.run(monitor.initialize())
+    
+    try:
+        # Jalankan bot
+        application.run_polling()
+    finally:
+        # Pastikan monitoring dihentikan dengan benar saat bot berhenti
+        monitor.stop_monitoring()
 
 if __name__ == "__main__":
     main()
