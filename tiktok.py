@@ -769,8 +769,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-def main():
-    """Fungsi utama untuk menjalankan bot."""
+async def _async_main():
+    """Async main function to run the bot."""
     # Inisialisasi database
     init_database()
     
@@ -803,15 +803,19 @@ def main():
     # Register error handler
     application.add_error_handler(error_handler)
     
-    # Inisialisasi monitor
-    asyncio.run(monitor.initialize())
+    # Initialize monitor
+    await monitor.initialize()
     
     try:
-        # Jalankan bot
-        application.run_polling()
+        # Run the bot using polling
+        await application.run_polling()
     finally:
-        # Pastikan monitoring dihentikan dengan benar saat bot berhenti
+        # Ensure monitoring is properly stopped when the bot stops
         monitor.stop_monitoring()
+
+def main():
+    """Fungsi utama untuk menjalankan bot."""
+    asyncio.run(_async_main())
 
 if __name__ == "__main__":
     main()
