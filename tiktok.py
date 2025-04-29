@@ -827,23 +827,15 @@ async def main():
     monitor = TikTokMonitor(application)
     application.bot_data["monitor"] = monitor
     
-    # Mulai aplikasi
-    await application.initialize()
-    
-    # Inisialisasi monitor setelah aplikasi diinisialisasi
+    # Initialize monitor
     monitor.initialize()
     
     try:
-        # Jalankan polling aplikasi
-        await application.start()
-        await application.updater.start_polling()
-        
-        # Berjalan sampai dihentikan
-        await application.updater.idle()
+        # Run the bot until the user presses Ctrl-C
+        await application.run_polling()
     finally:
-        # Hentikan aplikasi dan monitor
+        # Stop the application and monitor
         monitor.stop_monitoring()
-        await application.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
