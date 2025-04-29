@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TELEGRAM_BOT_TOKEN = "7839177497:AAFidAiXoNIJNMzby0-TbsH_FhavI_4w_eo"  # Token bot Anda
+TELEGRAM_BOT_TOKEN = "7839177497:AAFidAiXoNIJNMzby0-TbsH_FhavI_4w_eo"  # Replace with your new valid token
 ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
@@ -811,7 +811,7 @@ async def main():
         CHECK_INTERVAL = int(result[0])
     conn.close()
     
-    # Inisialisasi aplikasi bot Telegram dengan proper shutdown
+    # Inisialisasi aplikasi bot Telegram
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Register command handlers
@@ -841,14 +841,21 @@ async def main():
         await application.start()
         
         # Start polling updates from Telegram
-        # Set allowed_updates to an empty list to receive all updates
         await application.updater.start_polling(allowed_updates=[])
         
         # Log that the bot is ready
         logger.info("Bot is running! Press Ctrl+C to stop.")
         
         # Keep the bot running until Ctrl+C is pressed
-        await application.idle()
+        # Custom idle implementation for compatibility with older versions
+        try:
+            # Run the application until you press Ctrl+C
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            # This will be triggered when you press Ctrl+C
+            logger.info("Received keyboard interrupt, shutting down...")
+            
     except Exception as e:
         logger.error(f"Error in main application: {e}")
     finally:
@@ -857,8 +864,14 @@ async def main():
         monitor.stop_monitoring()
         
         # Make sure the application shuts down properly
-        if application.is_running:
-            await application.stop()
+        try:
+            # Use getattr to check if _running attribute exists and is True
+            if getattr(application, '_running', False):
+                await application.stop()
+            elif hasattr(application, 'updater') and application.updater.running:
+                await application.updater.stop()
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
             
         logger.info("Bot has been shut down successfully.")
 
