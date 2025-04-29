@@ -830,20 +830,18 @@ async def main():
     monitor = TikTokMonitor(application)
     application.bot_data["monitor"] = monitor
     
-    # DIUBAH: Tunggu inisialisasi monitor dengan await
-    # Ini memastikan task notification berjalan dalam event loop utama
     try:
-        # Run the bot until the user presses Ctrl-C
+        # Initialize and start the bot with monitor
         await application.initialize()
-        await monitor.initialize()  # Menunggu inisialisasi monitoring
+        notification_task = await monitor.initialize()  # Get the notification task
         await application.start()
         await application.updater.start_polling()
         
-        # Keep the application running until stopped
-        await application.updater.stop()
-        await application.stop()
+        # This is the key part - run the application until stopped
+        # It will keep running until you press Ctrl+C
+        await application.idle()
     finally:
-        # Stop the application and monitor
+        # Properly shut down everything
         monitor.stop_monitoring()
 
 if __name__ == "__main__":
