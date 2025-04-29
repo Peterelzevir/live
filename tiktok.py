@@ -92,17 +92,20 @@ class TikTokMonitor:
         self.monitor_thread = None
         self.notification_queue = queue.Queue()
         
-    def initialize(self):
+    async def initialize(self):
         """Inisialisasi dan mulai memantau semua akun yang tersimpan di database."""
         # Mulai thread monitoring
         self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.monitor_thread.start()
         
-        # Mulai task untuk memproses notifikasi
-        asyncio.create_task(self._process_notifications())
+        # Buat task untuk memproses notifikasi - DIUBAH: mengembalikan task untuk aplikasi utama
+        notification_task = asyncio.create_task(self._process_notifications())
         
         accounts = self.get_monitored_accounts()
         logger.info(f"Initialized monitoring for {len(accounts)} accounts")
+        
+        # Kembalikan task agar dapat dimasukkan ke dalam aplikasi
+        return notification_task
     
     def get_monitored_accounts(self) -> List[str]:
         """Dapatkan semua akun TikTok yang dipantau dari database."""
@@ -206,7 +209,7 @@ class TikTokMonitor:
     
     async def _process_notifications(self):
         """Proses notifikasi dari queue dan kirim ke admin."""
-        while True:
+        while not self.stop_event.is_set():
             try:
                 # Periksa queue untuk notifikasi (non-blocking)
                 if not self.notification_queue.empty():
@@ -827,12 +830,18 @@ async def main():
     monitor = TikTokMonitor(application)
     application.bot_data["monitor"] = monitor
     
-    # Initialize monitor
-    monitor.initialize()
-    
+    # DIUBAH: Tunggu inisialisasi monitor dengan await
+    # Ini memastikan task notification berjalan dalam event loop utama
     try:
         # Run the bot until the user presses Ctrl-C
-        await application.run_polling()
+        await application.initialize()
+        await monitor.initialize()  # Menunggu inisialisasi monitoring
+        await application.start()
+        await application.updater.start_polling()
+        
+        # Keep the application running until stopped
+        await application.updater.stop()
+        await application.stop()
     finally:
         # Stop the application and monitor
         monitor.stop_monitoring()
