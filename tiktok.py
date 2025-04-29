@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
-TELEGRAM_BOT_TOKEN = "7839177497:AAFidAiXoNIJNMzby0-TbsH_FhavI_4w_eo"  # Token bot Anda
+TELEGRAM_BOT_TOKEN = "7839177497:AAE8SPVj8e4c0eLta7m9kB2cPq9w92OBHhw"  # Token bot Anda
 ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
@@ -811,7 +811,7 @@ async def main():
         CHECK_INTERVAL = int(result[0])
     conn.close()
     
-    # Inisialisasi aplikasi bot Telegram
+    # Inisialisasi aplikasi bot Telegram dengan proper shutdown
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Register command handlers
@@ -831,18 +831,36 @@ async def main():
     application.bot_data["monitor"] = monitor
     
     try:
-        # Initialize and start the bot with monitor
+        # Initialize the application
         await application.initialize()
-        notification_task = await monitor.initialize()  # Get the notification task
-        await application.start()
-        await application.updater.start_polling()
         
-        # This is the key part - run the application until stopped
-        # It will keep running until you press Ctrl+C
+        # Initialize the monitor
+        await monitor.initialize()
+        
+        # Start the application
+        await application.start()
+        
+        # Start polling updates from Telegram
+        # Set allowed_updates to an empty list to receive all updates
+        await application.updater.start_polling(allowed_updates=[])
+        
+        # Log that the bot is ready
+        logger.info("Bot is running! Press Ctrl+C to stop.")
+        
+        # Keep the bot running until Ctrl+C is pressed
         await application.idle()
+    except Exception as e:
+        logger.error(f"Error in main application: {e}")
     finally:
-        # Properly shut down everything
+        # Ensure proper shutdown
+        logger.info("Shutting down...")
         monitor.stop_monitoring()
+        
+        # Make sure the application shuts down properly
+        if application.is_running:
+            await application.stop()
+            
+        logger.info("Bot has been shut down successfully.")
 
 if __name__ == "__main__":
     asyncio.run(main())
