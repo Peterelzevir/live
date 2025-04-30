@@ -31,6 +31,7 @@ ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 CHECK_INTERVAL = 60  # Interval pengecekan dalam detik (1 menit)
+BOT_VERSION = "1.2.0"  # Versi bot untuk tracking
 
 # Buat direktori rekaman jika belum ada
 os.makedirs(RECORDING_DIR, exist_ok=True)
@@ -92,17 +93,21 @@ class TikTokMonitor:
         self.monitor_thread = None
         self.notification_queue = queue.Queue()
         self.last_check_status = {}  # Menyimpan status terakhir checks
+        self.last_activity_time = time.time()  # Waktu aktivitas terakhir
+        self.error_count = 0  # Menghitung error konsekutif
         
     async def initialize(self):
         """Inisialisasi dan mulai memantau semua akun yang tersimpan di database."""
         logger.info("Initializing TikTok monitor...")
         
-        # Mulai thread monitoring
-        self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
-        self.monitor_thread.start()
+        # Mulai thread monitoring dengan watchdog
+        await self._start_monitoring_thread()
         
         # Buat task untuk memproses notifikasi
         notification_task = asyncio.create_task(self._process_notifications())
+        
+        # Buat task untuk watchdog
+        watchdog_task = asyncio.create_task(self._watchdog())
         
         accounts = self.get_monitored_accounts()
         logger.info(f"Initialized monitoring for {len(accounts)} accounts: {accounts}")
@@ -117,8 +122,85 @@ class TikTokMonitor:
             except Exception as e:
                 logger.error(f"Error sending startup message: {e}")
         
-        # Kembalikan task agar dapat dimasukkan ke dalam aplikasi
-        return notification_task
+        # Kombinasikan task dan kembalikan
+        return asyncio.gather(notification_task, watchdog_task)
+        
+    async def _start_monitoring_thread(self):
+        """Memulai thread monitoring dengan watchdog."""
+        self.monitor_thread = threading.Thread(target=self._monitoring_thread_wrapper, daemon=True)
+        self.monitor_thread.start()
+        logger.info("Monitoring thread started with watchdog")
+        
+    def _monitoring_thread_wrapper(self):
+        """Wrapper untuk monitoring thread yang memungkinkan restart otomatis."""
+        while not self.stop_event.is_set():
+            try:
+                # Jalankan loop monitoring
+                needs_restart = self._monitoring_loop()
+                
+                # Jika perlu restart, tunggu sebentar lalu mulai ulang
+                if needs_restart and not self.stop_event.is_set():
+                    logger.info("Monitoring thread restarting...")
+                    time.sleep(5)  # Tunggu 5 detik sebelum restart
+                    continue
+                else:
+                    # Loop berhenti normal, keluar dari wrapper
+                    break
+                    
+            except Exception as e:
+                logger.critical(f"Fatal error in monitoring thread: {e}")
+                if not self.stop_event.is_set():
+                    # Jika tidak diminta berhenti, coba lagi setelah delay
+                    time.sleep(10)
+                    continue
+                else:
+                    break
+                    
+        logger.info("Monitoring thread wrapper exiting")
+        
+    async def _watchdog(self):
+        """Watchdog untuk memastikan thread monitoring tetap berjalan."""
+        while not self.stop_event.is_set():
+            try:
+                # Periksa apakah thread monitoring masih hidup
+                if self.monitor_thread and not self.monitor_thread.is_alive():
+                    logger.critical("Monitoring thread died, restarting it")
+                    # Kirim notifikasi
+                    self.notification_queue.put({
+                        "type": "error",
+                        "message": "Thread pemantauan mati. Menghidupkan ulang thread."
+                    })
+                    # Restart thread
+                    await self._start_monitoring_thread()
+                
+                # Periksa jika tidak ada aktivitas dalam waktu lama
+                if time.time() - self.last_activity_time > 600:  # 10 menit
+                    logger.critical("No activity for 10 minutes, restarting monitoring thread")
+                    # Kirim notifikasi
+                    self.notification_queue.put({
+                        "type": "error",
+                        "message": "Tidak ada aktivitas selama 10 menit. Menghidupkan ulang thread pemantauan."
+                    })
+                    
+                    # Paksa restart thread
+                    if self.monitor_thread.is_alive():
+                        # Tidak bisa menghentikan thread langsung, jadi tandai untuk restart
+                        self.stop_event.set()
+                        time.sleep(2)
+                        self.stop_event.clear()
+                        await self._start_monitoring_thread()
+                    else:
+                        await self._start_monitoring_thread()
+                    
+                    # Reset waktu aktivitas
+                    self.last_activity_time = time.time()
+                
+                # Tunggu interval watchdog
+                await asyncio.sleep(30)  # Periksa setiap 30 detik
+                
+            except Exception as e:
+                logger.error(f"Error in watchdog: {e}")
+                await asyncio.sleep(60)  # Jika error, tunggu lebih lama
     
     def get_monitored_accounts(self) -> List[str]:
         """Dapatkan semua akun TikTok yang dipantau dari database."""
@@ -198,10 +280,24 @@ class TikTokMonitor:
     def _monitoring_loop(self):
         """Loop untuk memantau akun TikTok secara berkala."""
         logger.info("Monitoring thread started")
+        consecutive_errors = 0
+        
         while not self.stop_event.is_set():
             try:
+                # Update waktu aktivitas terakhir
+                self.last_activity_time = time.time()
+                
                 accounts = self.get_monitored_accounts()
+                if not accounts:
+                    logger.info("No accounts to monitor, waiting...")
+                    time.sleep(CHECK_INTERVAL)
+                    consecutive_errors = 0  # Reset error counter
+                    continue
+                    
                 for username in accounts:
+                    if self.stop_event.is_set():
+                        break  # Periksa lagi jika diminta berhenti
+                        
                     try:
                         # Cek status live
                         is_live = self._check_if_live(username)
@@ -236,22 +332,85 @@ class TikTokMonitor:
                         
                         # Update status terakhir
                         self.last_check_status[username] = is_live
-                    
+                        
+                        # Reset error counter karena berhasil
+                        consecutive_errors = 0
+                        
                     except Exception as e:
                         logger.error(f"Error memantau akun {username}: {e}")
+                        # Tidak increment error counter untuk error per akun
+                
+                # Verifikasi proses rekaman yang sedang berjalan
+                self._check_recording_processes()
                 
                 # Tunggu interval sebelum memeriksa kembali
                 time.sleep(CHECK_INTERVAL)
             
             except Exception as e:
-                logger.error(f"Error dalam monitoring loop: {e}")
-                time.sleep(10)  # Tunggu sebentar sebelum mencoba lagi
+                consecutive_errors += 1
+                self.error_count += 1
+                logger.error(f"Error dalam monitoring loop: {e} (Error #{consecutive_errors})")
+                
+                if consecutive_errors >= 5:
+                    logger.critical(f"Too many consecutive errors ({consecutive_errors}), restarting monitoring thread")
+                    
+                    # Kirim notifikasi ke admin via queue
+                    self.notification_queue.put({
+                        "type": "error",
+                        "message": f"Monitoring thread mengalami {consecutive_errors} error berturut-turut. Thread akan direstart."
+                    })
+                    
+                    # Restart thread dengan mengembalikan True (thread perlu direstart)
+                    # Tapi pastikan thread saat ini berhenti dulu
+                    return True
+                
+                # Tunggu sebentar sebelum mencoba lagi
+                time.sleep(min(10 * consecutive_errors, 60))  # Makin banyak error, makin lama menunggu (maksimal 1 menit)
+                
+        logger.info("Monitoring thread stopped gracefully")
+        return False  # Thread berhenti normal, tidak perlu direstart
     
+    def _check_recording_processes(self):
+        """Verifikasi bahwa semua proses rekaman berjalan dengan baik."""
+        usernames_to_check = list(self.recording_processes.keys())
+        
+        for username in usernames_to_check:
+            try:
+                process = self.recording_processes[username]
+                
+                # Periksa apakah proses masih berjalan
+                if process.poll() is not None:
+                    # Proses berhenti tanpa diminta - ini error
+                    logger.error(f"Recording process for {username} terminated unexpectedly with code {process.poll()}")
+                    
+                    # Tambahkan notifikasi
+                    self.notification_queue.put({
+                        "type": "recording_error",
+                        "username": username,
+                        "error_code": process.poll()
+                    })
+                    
+                    # Hapus dari daftar recording dan proses
+                    self.stop_recording(username)
+                    
+                    # Coba mulai ulang rekaman jika masih live
+                    if self.last_check_status.get(username, False):
+                        logger.info(f"Attempting to restart recording for {username}")
+                        self.start_recording(username)
+            
+            except Exception as e:
+                logger.error(f"Error checking recording process for {username}: {e}")
+
     async def _process_notifications(self):
         """Proses notifikasi dari queue dan kirim ke admin."""
         logger.info("Notification processing task started")
+        consecutive_errors = 0
+        
         while not self.stop_event.is_set():
             try:
+                # Update waktu aktivitas terakhir
+                self.last_activity_time = time.time()
+                
                 # Periksa queue untuk notifikasi (non-blocking)
                 try:
                     notification = self.notification_queue.get_nowait()
@@ -263,19 +422,55 @@ class TikTokMonitor:
                     elif notification["type"] == "live_end":
                         await self.notify_admins(f"🔴 Livestream <b>{notification['username']}</b> telah berakhir. Rekaman selesai.")
                     
+                    elif notification["type"] == "force_record":
+                        await self.notify_admins(f"▶️ Rekaman untuk <b>{notification['username']}</b> dipaksa dimulai secara manual.")
+                    
+                    elif notification["type"] == "recording_error":
+                        await self.notify_admins(f"⚠️ Error rekaman untuk <b>{notification['username']}</b> (kode: {notification['error_code']}). Mencoba ulang...")
+                    
+                    elif notification["type"] == "error":
+                        await self.notify_admins(f"⚠️ ERROR: {notification['message']}")
+                    
                     # Mark task as done
                     self.notification_queue.task_done()
+                    
+                    # Reset error counter karena berhasil
+                    consecutive_errors = 0
                 
                 except queue.Empty:
                     # No notifications in queue
                     pass
                 
+                # Periksa jika thread monitoring sudah lama tidak aktif
+                if time.time() - self.last_activity_time > 300:  # 5 menit
+                    logger.warning("No monitoring activity for 5 minutes, sending notification")
+                    await self.notify_admins("⚠️ Peringatan: Tidak ada aktivitas pemantauan selama 5 menit. Bot mungkin mengalami masalah.")
+                    self.last_activity_time = time.time()  # Reset waktu
+                
                 # Tunggu sebentar sebelum memeriksa lagi
                 await asyncio.sleep(1)
                 
             except Exception as e:
-                logger.error(f"Error memproses notifikasi: {e}")
-                await asyncio.sleep(5)
+                consecutive_errors += 1
+                logger.error(f"Error memproses notifikasi: {e} (Error #{consecutive_errors})")
+                
+                if consecutive_errors >= 10:
+                    logger.critical("Too many errors in notification processing, restarting task")
+                    # Kirim notifikasi emergency ke semua admin
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await self.app.bot.send_message(
+                                chat_id=admin_id,
+                                text="⚠️ CRITICAL ERROR: Notification processing failed repeatedly. Bot might need manual restart."
+                            )
+                        except:
+                            pass
+                    
+                    # Reset error counter
+                    consecutive_errors = 0
+                
+                # Tunggu lebih lama jika error konsekutif
+                await asyncio.sleep(5 + (consecutive_errors * 2))
     
     def _check_if_live(self, username: str) -> bool:
         """Cek apakah akun TikTok sedang live menggunakan yt-dlp."""
@@ -659,6 +854,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Cek Status Sekarang", callback_data="force_check"),
             InlineKeyboardButton("▶️ Paksa Rekam", callback_data="force_record"),
         ],
+        [
+            InlineKeyboardButton("🔄 Restart Bot", callback_data="restart_bot"),
+            InlineKeyboardButton("⏹️ Stop Bot", callback_data="stop_bot"),
+        ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -668,6 +867,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Silakan pilih opsi di bawah:",
         reply_markup=reply_markup
     )
+
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /restart - memulai ulang bot."""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Maaf, bot ini hanya dapat digunakan oleh admin.")
+        return
+    
+    await update.message.reply_text("⚙️ Memulai ulang bot... Bot akan kembali online dalam beberapa detik.")
+    
+    # Ini akan mengakhiri aplikasi dengan kode keluar 42
+    # Anda harus membuat script wrapper yang akan restart program jika exit code = 42
+    logger.info("Admin requested restart. Exiting with code 42 for restart.")
+    
+    # Matikan semua pemantauan sebelum restart
+    monitor = context.bot_data.get("monitor")
+    if monitor:
+        monitor.stop_monitoring()
+    
+    # Beri waktu untuk cleanup
+    await asyncio.sleep(2)
+    
+    # Siapkan restart
+    os._exit(42)  # Hard exit yang akan ditangkap oleh script wrapper
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk callback button."""
@@ -1017,6 +1241,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Kembali ke menu utama: /start"
             )
     
+    elif action == "restart_bot":
+        await query.edit_message_text("⚙️ Memulai ulang bot... Bot akan kembali online dalam beberapa detik.")
+        
+        logger.info("Admin requested restart via button. Exiting with code 42 for restart.")
+        
+        # Matikan semua pemantauan sebelum restart
+        monitor = context.bot_data.get("monitor")
+        if monitor:
+            monitor.stop_monitoring()
+        
+        # Beri waktu untuk cleanup
+        await asyncio.sleep(2)
+        
+        # Siapkan restart
+        os._exit(42)  # Hard exit yang akan ditangkap oleh script wrapper
+    
+    elif action == "stop_bot":
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Ya, Matikan Bot", callback_data="confirm_stop_bot"),
+                InlineKeyboardButton("❌ Tidak, Batal", callback_data="back_to_main"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⚠️ PERHATIAN: Anda akan mematikan bot\n\n"
+            "Bot akan berhenti memantau akun dan tidak akan merekam livestream.\n"
+            "Anda harus mengaktifkan kembali bot secara manual.\n\n"
+            "Apakah Anda yakin?",
+            reply_markup=reply_markup
+        )
+    
+    elif action == "confirm_stop_bot":
+        await query.edit_message_text("🛑 Mematikan bot...")
+        
+        logger.info("Admin requested to stop the bot")
+        
+        # Matikan semua pemantauan
+        monitor = context.bot_data.get("monitor")
+        if monitor:
+            monitor.stop_monitoring()
+        
+        # Kirim pesan terakhir
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🛑 Bot telah dimatikan. Untuk menjalankan kembali, aktifkan bot secara manual."
+        )
+        
+        # Keluar dengan kode normal
+        os._exit(0)
+        
     elif action == "back_to_main":
         # Kembali ke menu utama
         await start_command(update, context)
@@ -1124,6 +1400,7 @@ async def main():
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_command))
+    application.add_handler(CommandHandler("restart", restart_command))
     
     # Register callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -1154,22 +1431,53 @@ async def main():
         # Log that the bot is ready
         logger.info("Bot is running! Press Ctrl+C to stop.")
         
-        # Run the application until interrupted
-        await asyncio.gather(
-            notification_task,
-            application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        )
+        # Buat task keepalive untuk mencegah bot mati
+        async def keep_alive():
+            while True:
+                try:
+                    # Periksa apakah bot masih hidup setiap menit
+                    logger.info("Bot still running - keepalive check")
+                    await asyncio.sleep(60)
+                except Exception as e:
+                    logger.error(f"Error in keepalive: {e}")
         
+        # Kumpulkan semua task yang harus dijaga tetap hidup
+        tasks = [
+            notification_task,
+            keep_alive(),
+        ]
+        
+        # Jalankan bot tanpa batas waktu sampai diinterupsi manual
+        await asyncio.gather(*tasks)
+        
+    except asyncio.CancelledError:
+        # Ini adalah interupsi normal, jangan lakukan apa-apa
+        logger.info("Main task was cancelled, shutting down gracefully...")
     except Exception as e:
-        logger.error(f"Error in main application: {e}")
+        logger.error(f"Critical error in main application: {e}")
+        # Kirim notifikasi ke admin tentang error
+        for admin_id in ADMIN_IDS:
+            try:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"⚠️ BOT ERROR: {str(e)}\nBot akan dijalankan ulang."
+                )
+            except:
+                pass
+        
+        # Coba jalankan ulang bot setelah error
+        logger.info("Attempting to restart in 5 seconds...")
+        await asyncio.sleep(5)
+        await main()  # Restart bot
+        return
     finally:
-        # Ensure proper shutdown
+        # Ini hanya dijalankan jika bot dimatikan dengan sengaja (Ctrl+C)
         logger.info("Shutting down...")
         monitor.stop_monitoring()
         
         # Make sure the application shuts down properly
         try:
-            if application.updater.running:
+            if hasattr(application, 'updater') and application.updater.running:
                 await application.updater.stop()
             if getattr(application, '_running', False):
                 await application.stop()
@@ -1178,5 +1486,52 @@ async def main():
             
         logger.info("Bot has been shut down successfully.")
 
+# Script wrapper untuk restart otomatis
 if __name__ == "__main__":
-    asyncio.run(main())
+    max_restarts = 10
+    restart_count = 0
+    
+    # Tambahkan handler khusus untuk exit signal
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}, exiting cleanly")
+        os._exit(0)
+        
+    # Register signal handlers
+    import signal
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    while restart_count < max_restarts:
+        try:
+            # Tambahkan log untuk membantu troubleshooting
+            logger.info(f"Starting bot (restart #{restart_count})")
+            
+            # Jalankan aplikasi utama
+            exit_code = 0
+            try:
+                asyncio.run(main())
+            except SystemExit as e:
+                exit_code = e.code
+            
+            # Periksa kode exit
+            if exit_code == 42:
+                # Kode restart yang diminta
+                logger.info("Bot requested restart (exit code 42)")
+                restart_count += 1
+                # Tunggu sebentar sebelum restart
+                time.sleep(5)
+                continue
+            else:
+                # Exit normal atau error
+                logger.info(f"Bot exited with code {exit_code}")
+                break
+                
+        except Exception as e:
+            restart_count += 1
+            logger.critical(f"Fatal error: {e}")
+            time.sleep(10)  # Tunggu sebelum coba lagi
+    
+    if restart_count >= max_restarts:
+        logger.critical(f"Exceeded maximum number of restarts ({max_restarts}). Giving up.")
+    
+    logger.info("Bot has completely shut down.")
