@@ -91,18 +91,31 @@ class TikTokMonitor:
         self.stop_event = threading.Event()
         self.monitor_thread = None
         self.notification_queue = queue.Queue()
+        self.last_check_status = {}  # Menyimpan status terakhir checks
         
     async def initialize(self):
         """Inisialisasi dan mulai memantau semua akun yang tersimpan di database."""
+        logger.info("Initializing TikTok monitor...")
+        
         # Mulai thread monitoring
         self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.monitor_thread.start()
         
-        # Buat task untuk memproses notifikasi - DIUBAH: mengembalikan task untuk aplikasi utama
+        # Buat task untuk memproses notifikasi
         notification_task = asyncio.create_task(self._process_notifications())
         
         accounts = self.get_monitored_accounts()
-        logger.info(f"Initialized monitoring for {len(accounts)} accounts")
+        logger.info(f"Initialized monitoring for {len(accounts)} accounts: {accounts}")
+        
+        # Kirim pesan startup ke admin
+        for admin_id in ADMIN_IDS:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"🤖 Bot TikTok Monitor telah aktif!\n\nMemantau {len(accounts)} akun."
+                )
+            except Exception as e:
+                logger.error(f"Error sending startup message: {e}")
         
         # Kembalikan task agar dapat dimasukkan ke dalam aplikasi
         return notification_task
@@ -136,6 +149,16 @@ class TikTokMonitor:
             conn.close()
             
             logger.info(f"Added account {username} to monitoring list")
+
+            # Segera cek status live setelah menambahkan akun
+            is_live = self._check_if_live(username)
+            if is_live:
+                self.notification_queue.put({
+                    "type": "live_start",
+                    "username": username
+                })
+                self.start_recording(username)
+                
             return True
         except Exception as e:
             logger.error(f"Error menambahkan akun {username}: {e}")
@@ -162,11 +185,19 @@ class TikTokMonitor:
     
     def _validate_tiktok_username(self, username: str) -> bool:
         """Validasi apakah username TikTok valid."""
-        # Validasi sederhana
-        return username and len(username) >= 2
+        if not username or len(username) < 2:
+            return False
+        
+        # Validasi karakter yang diperbolehkan
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._")
+        if not all(c in allowed_chars for c in username):
+            return False
+            
+        return True
     
     def _monitoring_loop(self):
         """Loop untuk memantau akun TikTok secara berkala."""
+        logger.info("Monitoring thread started")
         while not self.stop_event.is_set():
             try:
                 accounts = self.get_monitored_accounts()
@@ -174,9 +205,14 @@ class TikTokMonitor:
                     try:
                         # Cek status live
                         is_live = self._check_if_live(username)
+                        logger.info(f"Checked {username}: {'LIVE' if is_live else 'NOT LIVE'}")
                         
-                        # Jika sedang live dan belum merekam, mulai rekaman
-                        if is_live and username not in self.recording_processes:
+                        # Simpan status sebelumnya
+                        was_live = self.last_check_status.get(username, False)
+                        
+                        # Perubahan status: offline -> live
+                        if is_live and not was_live:
+                            logger.info(f"Status change detected: {username} is now LIVE")
                             # Tambahkan notifikasi ke queue
                             self.notification_queue.put({
                                 "type": "live_start",
@@ -186,8 +222,9 @@ class TikTokMonitor:
                             # Mulai merekam
                             self.start_recording(username)
                         
-                        # Jika tidak live tapi masih merekam, hentikan rekaman
-                        elif not is_live and username in self.recording_processes:
+                        # Perubahan status: live -> offline
+                        elif not is_live and was_live:
+                            logger.info(f"Status change detected: {username} is no longer live")
                             # Tambahkan notifikasi ke queue
                             self.notification_queue.put({
                                 "type": "live_end",
@@ -196,6 +233,9 @@ class TikTokMonitor:
                             
                             # Hentikan rekaman
                             self.stop_recording(username)
+                        
+                        # Update status terakhir
+                        self.last_check_status[username] = is_live
                     
                     except Exception as e:
                         logger.error(f"Error memantau akun {username}: {e}")
@@ -209,23 +249,30 @@ class TikTokMonitor:
     
     async def _process_notifications(self):
         """Proses notifikasi dari queue dan kirim ke admin."""
+        logger.info("Notification processing task started")
         while not self.stop_event.is_set():
             try:
                 # Periksa queue untuk notifikasi (non-blocking)
-                if not self.notification_queue.empty():
+                try:
                     notification = self.notification_queue.get_nowait()
+                    logger.info(f"Processing notification: {notification}")
                     
                     if notification["type"] == "live_start":
                         await self.notify_admins(f"🟢 <b>{notification['username']}</b> sedang LIVE! Rekaman dimulai otomatis.")
                     
                     elif notification["type"] == "live_end":
                         await self.notify_admins(f"🔴 Livestream <b>{notification['username']}</b> telah berakhir. Rekaman selesai.")
+                    
+                    # Mark task as done
+                    self.notification_queue.task_done()
+                
+                except queue.Empty:
+                    # No notifications in queue
+                    pass
                 
                 # Tunggu sebentar sebelum memeriksa lagi
                 await asyncio.sleep(1)
                 
-            except queue.Empty:
-                await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"Error memproses notifikasi: {e}")
                 await asyncio.sleep(5)
@@ -236,34 +283,78 @@ class TikTokMonitor:
             # Format URL TikTok Live
             tiktok_url = f"https://www.tiktok.com/@{username}/live"
             
-            # Gunakan yt-dlp untuk memeriksa status live
+            # Pendekatan yang lebih efektif untuk memeriksa status live
             cmd = [
                 "yt-dlp", 
                 "--no-check-certificate",
+                "--no-warnings",
                 "--skip-download",
-                "--print", "title",
+                "--quiet",
+                "--ignore-no-formats-error",
+                "--ignore-config",  # Abaikan konfigurasi lokal yang bisa menyebabkan masalah
+                "--force-ipv4",     # Paksa menggunakan IPv4
+                "--extractor-retries", "3",  # Coba beberapa kali jika gagal
+                "--socket-timeout", "10",    # Timeout lebih cepat
                 tiktok_url
             ]
             
-            # Jalankan perintah dengan timeout
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
             try:
-                stdout, stderr = process.communicate(timeout=30)
+                # Gunakan cURL sebagai backup untuk URL checking
+                curl_cmd = [
+                    "curl", 
+                    "-s",           # Silent mode
+                    "-L",           # Follow redirects
+                    "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",  # User agent
+                    "--connect-timeout", "5",
+                    tiktok_url
+                ]
                 
-                # Jika proses keluar dengan kode 0 dan stdout tidak kosong, user sedang live
-                if process.returncode == 0 and stdout.strip():
-                    logger.info(f"Account {username} is LIVE: {stdout.strip()}")
-                    return True
+                # Coba dengan yt-dlp dulu
+                logger.debug(f"Checking if {username} is live with yt-dlp")
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
                 
-                # Jika error atau tidak ada output, user tidak sedang live
-                logger.debug(f"Account {username} is NOT live")
-                return False
+                stdout, stderr = process.communicate(timeout=15)
+                
+                # Cek jika ada error yang menunjukkan stream tidak live
+                if process.returncode != 0:
+                    if "This video is not available" in stderr or "HTTP Error 404" in stderr:
+                        logger.debug(f"{username} is NOT live (404 error)")
+                        return False
+                    
+                    # Gunakan curl sebagai backup
+                    logger.debug(f"yt-dlp failed, trying with curl for {username}")
+                    curl_process = subprocess.Popen(
+                        curl_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    
+                    curl_output, _ = curl_process.communicate(timeout=10)
+                    
+                    # Cek output curl untuk indikator live
+                    if "LIVE" in curl_output and f"@{username}" in curl_output:
+                        logger.info(f"Account {username} is LIVE (detected with curl)")
+                        return True
+                    
+                    # Tambahan: cek frasa tertentu yang muncul di halaman streaming
+                    live_indicators = ["is LIVE now", "LIVE stream", "livestream", "Live viewers"]
+                    for indicator in live_indicators:
+                        if indicator in curl_output:
+                            logger.info(f"Account {username} is LIVE (detected indicator: {indicator})")
+                            return True
+                    
+                    logger.debug(f"{username} is NOT live (based on curl)")
+                    return False
+                
+                # Jika yt-dlp berhasil, berarti stream live terdeteksi
+                logger.info(f"Account {username} is LIVE! (yt-dlp success)")
+                return True
             
             except subprocess.TimeoutExpired:
                 process.kill()
@@ -277,6 +368,11 @@ class TikTokMonitor:
     def start_recording(self, username: str):
         """Mulai merekam livestream TikTok."""
         try:
+            # Periksa apakah sudah merekam
+            if username in self.recording_processes:
+                logger.info(f"Already recording {username}, skipping")
+                return
+                
             # Dapatkan kualitas rekaman dari pengaturan
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -301,19 +397,34 @@ class TikTokMonitor:
             # Format URL TikTok Live
             tiktok_url = f"https://www.tiktok.com/@{username}/live"
             
-            # Jalankan proses rekaman menggunakan yt-dlp
+            # Parameter yt-dlp yang lebih baik untuk merekam
             cmd = [
                 "yt-dlp", 
                 "--no-check-certificate",
-                "--hls-use-mpegts",
+                "--hls-use-mpegts",         # Gunakan format MPEG-TS untuk HLS
+                "--live-from-start",        # Rekam dari awal stream
+                "--no-part",                # Gunakan file normal daripada .part file
+                "--no-mtime",               # Jangan ubah waktu modifikasi file
+                "--no-warnings",            # Kurangi pesan warning
+                "--retries", "infinite",    # Coba ulang tanpa batas jika ada error
+                "--fragment-retries", "infinite",  # Coba ulang download fragment tanpa batas
+                "--force-ipv4",             # Paksa IPv4
+                "--extractor-retries", "3", # Coba beberapa kali jika extractor gagal
                 "-o", file_path,
                 tiktok_url
             ]
             
+            # Log command yang dijalankan
+            logger.info(f"Starting recording with command: {' '.join(cmd)}")
+            
+            # Jalankan proses dengan output dialihkan ke file log
+            log_file_path = os.path.join(RECORDING_DIR, f"{username}_{timestamp}_log.txt")
+            log_file = open(log_file_path, "w")
+            
             process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=log_file,
+                stderr=log_file,
                 text=True
             )
             
@@ -323,10 +434,11 @@ class TikTokMonitor:
                 "id": recording_id,
                 "file_path": file_path,
                 "start_time": now,
-                "quality": quality
+                "quality": quality,
+                "log_file": log_file
             }
             
-            logger.info(f"Started recording livestream {username} with quality {quality}")
+            logger.info(f"Started recording livestream for {username} with quality {quality}")
         except Exception as e:
             logger.error(f"Error memulai rekaman {username}: {e}")
     
@@ -336,10 +448,14 @@ class TikTokMonitor:
             try:
                 # Hentikan proses rekaman
                 process = self.recording_processes[username]
+                logger.info(f"Stopping recording for {username}")
+                
+                # Kirim SIGTERM untuk berhenti dengan baik
                 process.terminate()
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
+                    logger.warning(f"Termination timeout for {username}, sending SIGKILL")
                     process.kill()
                 
                 # Update database
@@ -354,6 +470,10 @@ class TikTokMonitor:
                     conn.commit()
                     conn.close()
                     
+                    # Tutup file log
+                    if "log_file" in recording and not recording["log_file"].closed:
+                        recording["log_file"].close()
+                    
                     # Hapus dari daftar rekaman aktif
                     del self.active_recordings[username]
                 
@@ -366,6 +486,9 @@ class TikTokMonitor:
     
     async def notify_admins(self, message: str):
         """Kirim notifikasi ke semua admin."""
+        logger.info(f"Sending notification to admins: {message}")
+        success = False
+        
         for admin_id in ADMIN_IDS:
             try:
                 await self.app.bot.send_message(
@@ -373,8 +496,12 @@ class TikTokMonitor:
                     text=message,
                     parse_mode="HTML"
                 )
+                success = True
+                logger.info(f"Notification sent to admin {admin_id}")
             except Exception as e:
                 logger.error(f"Error mengirim notifikasi ke admin {admin_id}: {e}")
+                
+        return success
     
     def get_active_recordings(self) -> List[Dict]:
         """Dapatkan daftar rekaman yang sedang aktif."""
@@ -439,6 +566,63 @@ class TikTokMonitor:
             logger.error(f"Error mendapatkan file rekaman {recording_id}: {e}")
             return None
     
+    def force_check_all(self):
+        """Paksa pengecekan semua akun sekarang."""
+        accounts = self.get_monitored_accounts()
+        results = {}
+        
+        for username in accounts:
+            is_live = self._check_if_live(username)
+            results[username] = is_live
+            
+            # Update status
+            was_live = self.last_check_status.get(username, False)
+            self.last_check_status[username] = is_live
+            
+            # Perubahan status: offline -> live
+            if is_live and not was_live:
+                self.notification_queue.put({
+                    "type": "live_start",
+                    "username": username
+                })
+                self.start_recording(username)
+            
+            # Perubahan status: live -> offline
+            elif not is_live and was_live:
+                self.notification_queue.put({
+                    "type": "live_end",
+                    "username": username
+                })
+                self.stop_recording(username)
+        
+        return results
+    
+    def force_record(self, username: str) -> bool:
+        """Paksa mulai merekam akun tertentu, terlepas dari status live."""
+        try:
+            # Pastikan akun ada dalam daftar pantauan
+            accounts = self.get_monitored_accounts()
+            if username not in accounts:
+                logger.error(f"Cannot force record: {username} not in monitored accounts")
+                return False
+                
+            # Mulai merekam
+            self.start_recording(username)
+            
+            # Update status
+            self.last_check_status[username] = True
+            
+            # Kirim notifikasi
+            self.notification_queue.put({
+                "type": "force_record",
+                "username": username
+            })
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error force recording {username}: {e}")
+            return False
+    
     def stop_monitoring(self):
         """Hentikan seluruh pemantauan."""
         self.stop_event.set()
@@ -470,6 +654,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("📚 Riwayat Rekaman", callback_data="recording_history"),
             InlineKeyboardButton("⚙️ Pengaturan", callback_data="settings"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Cek Status Sekarang", callback_data="force_check"),
+            InlineKeyboardButton("▶️ Paksa Rekam", callback_data="force_record"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -552,7 +740,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             message = "📋 Daftar Akun yang Dipantau:\n\n"
             for i, account in enumerate(accounts, 1):
-                message += f"{i}. @{account}\n"
+                # Cek status saat ini
+                status = "🟢 LIVE" if monitor.last_check_status.get(account, False) else "🔴 Tidak Live"
+                message += f"{i}. @{account} - {status}\n"
         
         keyboard = [[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_main")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -658,19 +848,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"⏳ Mengirim rekaman @{username}... Mohon tunggu.")
             
             try:
-                with open(file_path, "rb") as video_file:
-                    await context.bot.send_document(
+                # Cek ukuran file
+                file_size = os.path.getsize(file_path)
+                if file_size > 50 * 1024 * 1024:  # 50 MB (batas Telegram)
+                    await context.bot.send_message(
                         chat_id=user_id,
-                        document=video_file,
-                        filename=os.path.basename(file_path),
-                        caption=f"📹 Rekaman @{username}"
+                        text=f"⚠️ File rekaman terlalu besar ({file_size/1024/1024:.1f} MB) untuk dikirim via Telegram (batas 50 MB).\n"
+                        f"File tersimpan di server: {file_path}\n\n"
+                        "Kembali ke menu utama: /start"
                     )
-                
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ Rekaman @{username} berhasil dikirim.\n\n"
-                    "Kembali ke menu utama: /start"
-                )
+                else:
+                    # Kirim file
+                    with open(file_path, "rb") as video_file:
+                        await context.bot.send_document(
+                            chat_id=user_id,
+                            document=video_file,
+                            filename=os.path.basename(file_path),
+                            caption=f"📹 Rekaman @{username}"
+                        )
+                    
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=f"✅ Rekaman @{username} berhasil dikirim.\n\n"
+                        "Kembali ke menu utama: /start"
+                    )
             except Exception as e:
                 logger.error(f"Error mengirim file rekaman: {e}")
                 await context.bot.send_message(
@@ -749,10 +950,116 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Interval pengecekan berhasil diubah menjadi {seconds} detik.\n\n"
             "Kembali ke menu utama: /start"
         )
+        
+    elif action == "force_check":
+        monitor = context.bot_data["monitor"]
+        await query.edit_message_text("⏳ Sedang memeriksa status semua akun... Mohon tunggu.")
+        
+        try:
+            # Paksa pengecekan semua akun
+            results = monitor.force_check_all()
+            
+            if not results:
+                message = "Tidak ada akun yang dipantau saat ini."
+            else:
+                message = "📊 Hasil Pengecekan Status:\n\n"
+                for username, is_live in results.items():
+                    status = "🟢 LIVE" if is_live else "🔴 Tidak Live"
+                    message += f"@{username}: {status}\n"
+            
+            keyboard = [[InlineKeyboardButton("🔙 Kembali", callback_data="back_to_main")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(message, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Error saat force check: {e}")
+            await query.edit_message_text(
+                f"❌ Terjadi kesalahan saat memeriksa status: {str(e)}\n\n"
+                "Kembali ke menu utama: /start"
+            )
+            
+    elif action == "force_record":
+        # Tampilkan daftar akun untuk dipaksa merekam
+        monitor = context.bot_data["monitor"]
+        accounts = monitor.get_monitored_accounts()
+        
+        if not accounts:
+            await query.edit_message_text(
+                "Tidak ada akun yang dipantau saat ini.\n\n"
+                "Kembali ke menu utama: /start"
+            )
+            return
+        
+        keyboard = []
+        for account in accounts:
+            keyboard.append([InlineKeyboardButton(f"@{account}", callback_data=f"force_record_{account}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Kembali", callback_data="back_to_main")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "Pilih akun yang ingin dipaksa merekam:",
+            reply_markup=reply_markup
+        )
+        
+    elif action.startswith("force_record_"):
+        username = action.replace("force_record_", "")
+        monitor = context.bot_data["monitor"]
+        
+        if monitor.force_record(username):
+            await query.edit_message_text(
+                f"✅ Rekaman untuk @{username} telah dipaksa dimulai.\n\n"
+                "Kembali ke menu utama: /start"
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ Gagal memulai rekaman untuk @{username}.\n\n"
+                "Kembali ke menu utama: /start"
+            )
     
     elif action == "back_to_main":
         # Kembali ke menu utama
         await start_command(update, context)
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler untuk command /check"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Maaf, bot ini hanya dapat digunakan oleh admin.")
+        return
+    
+    args = context.args
+    monitor = context.bot_data["monitor"]
+    
+    if not args:
+        await update.message.reply_text(
+            "Gunakan: /check <username> untuk memeriksa status satu akun\n"
+            "atau /check all untuk memeriksa semua akun"
+        )
+        return
+    
+    if args[0].lower() == "all":
+        await update.message.reply_text("⏳ Sedang memeriksa status semua akun... Mohon tunggu.")
+        results = monitor.force_check_all()
+        
+        if not results:
+            await update.message.reply_text("Tidak ada akun yang dipantau saat ini.")
+            return
+            
+        message = "📊 Hasil Pengecekan Status:\n\n"
+        for username, is_live in results.items():
+            status = "🟢 LIVE" if is_live else "🔴 Tidak Live"
+            message += f"@{username}: {status}\n"
+            
+        await update.message.reply_text(message)
+    else:
+        username = args[0].replace("@", "")
+        await update.message.reply_text(f"⏳ Sedang memeriksa status @{username}... Mohon tunggu.")
+        
+        is_live = monitor._check_if_live(username)
+        status = "🟢 LIVE" if is_live else "🔴 Tidak Live"
+        await update.message.reply_text(f"Status @{username}: {status}")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler untuk pesan."""
@@ -816,6 +1123,7 @@ async def main():
     
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("check", check_command))
     
     # Register callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -835,27 +1143,23 @@ async def main():
         await application.initialize()
         
         # Initialize the monitor
-        await monitor.initialize()
+        notification_task = await monitor.initialize()
         
         # Start the application
         await application.start()
         
         # Start polling updates from Telegram
-        await application.updater.start_polling(allowed_updates=[])
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         
         # Log that the bot is ready
         logger.info("Bot is running! Press Ctrl+C to stop.")
         
-        # Keep the bot running until Ctrl+C is pressed
-        # Custom idle implementation for compatibility with older versions
-        try:
-            # Run the application until you press Ctrl+C
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            # This will be triggered when you press Ctrl+C
-            logger.info("Received keyboard interrupt, shutting down...")
-            
+        # Run the application until interrupted
+        await asyncio.gather(
+            notification_task,
+            application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        )
+        
     except Exception as e:
         logger.error(f"Error in main application: {e}")
     finally:
@@ -865,11 +1169,10 @@ async def main():
         
         # Make sure the application shuts down properly
         try:
-            # Use getattr to check if _running attribute exists and is True
+            if application.updater.running:
+                await application.updater.stop()
             if getattr(application, '_running', False):
                 await application.stop()
-            elif hasattr(application, 'updater') and application.updater.running:
-                await application.updater.stop()
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
             
