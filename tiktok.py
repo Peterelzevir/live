@@ -478,7 +478,41 @@ class TikTokMonitor:
             # Format URL TikTok Live
             tiktok_url = f"https://www.tiktok.com/@{username}/live"
             
-            # Pendekatan yang lebih efektif untuk memeriksa status live
+            # Pendekatan yang lebih akurat untuk memeriksa status live
+            # 1. Pendekatan utama dengan yt-dlp
+            yt_dlp_result = self._check_live_with_ytdlp(username, tiktok_url)
+            
+            # 2. Pendekatan backup dengan curl
+            curl_result = self._check_live_with_curl(username, tiktok_url)
+            
+            # 3. Verifikasi ganda (memerlukan 2 metode konfirmasi)
+            if yt_dlp_result and curl_result:
+                logger.info(f"Account {username} is confirmed LIVE (both methods detected)")
+                return True
+                
+            # 4. Jika hanya satu metode mendeteksi, lakukan verifikasi tambahan
+            if yt_dlp_result or curl_result:
+                # Lakukan verifikasi tambahan dengan yt-dlp info-json
+                json_result = self._check_live_with_json(username, tiktok_url)
+                
+                if json_result:
+                    logger.info(f"Account {username} is LIVE (verified with info-json)")
+                    return True
+                else:
+                    logger.info(f"Account {username} is NOT live (info-json verification failed)")
+                    return False
+            
+            # Jika tidak ada metode yang mendeteksi live
+            logger.debug(f"{username} is NOT live (multiple methods checked)")
+            return False
+        
+        except Exception as e:
+            logger.error(f"Error checking if {username} is live: {e}")
+            return False
+            
+    def _check_live_with_ytdlp(self, username: str, tiktok_url: str) -> bool:
+        """Cek live dengan yt-dlp."""
+        try:
             cmd = [
                 "yt-dlp", 
                 "--no-check-certificate",
@@ -486,78 +520,163 @@ class TikTokMonitor:
                 "--skip-download",
                 "--quiet",
                 "--ignore-no-formats-error",
-                "--ignore-config",  # Abaikan konfigurasi lokal yang bisa menyebabkan masalah
-                "--force-ipv4",     # Paksa menggunakan IPv4
-                "--extractor-retries", "3",  # Coba beberapa kali jika gagal
-                "--socket-timeout", "10",    # Timeout lebih cepat
+                "--ignore-config",
+                "--force-ipv4",
+                "--extractor-retries", "2",
+                "--socket-timeout", "10",
                 tiktok_url
             ]
             
-            try:
-                # Gunakan cURL sebagai backup untuk URL checking
-                curl_cmd = [
-                    "curl", 
-                    "-s",           # Silent mode
-                    "-L",           # Follow redirects
-                    "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",  # User agent
-                    "--connect-timeout", "5",
-                    tiktok_url
-                ]
-                
-                # Coba dengan yt-dlp dulu
-                logger.debug(f"Checking if {username} is live with yt-dlp")
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                stdout, stderr = process.communicate(timeout=15)
-                
-                # Cek jika ada error yang menunjukkan stream tidak live
-                if process.returncode != 0:
-                    if "This video is not available" in stderr or "HTTP Error 404" in stderr:
-                        logger.debug(f"{username} is NOT live (404 error)")
-                        return False
-                    
-                    # Gunakan curl sebagai backup
-                    logger.debug(f"yt-dlp failed, trying with curl for {username}")
-                    curl_process = subprocess.Popen(
-                        curl_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    
-                    curl_output, _ = curl_process.communicate(timeout=10)
-                    
-                    # Cek output curl untuk indikator live
-                    if "LIVE" in curl_output and f"@{username}" in curl_output:
-                        logger.info(f"Account {username} is LIVE (detected with curl)")
-                        return True
-                    
-                    # Tambahan: cek frasa tertentu yang muncul di halaman streaming
-                    live_indicators = ["is LIVE now", "LIVE stream", "livestream", "Live viewers"]
-                    for indicator in live_indicators:
-                        if indicator in curl_output:
-                            logger.info(f"Account {username} is LIVE (detected indicator: {indicator})")
-                            return True
-                    
-                    logger.debug(f"{username} is NOT live (based on curl)")
-                    return False
-                
-                # Jika yt-dlp berhasil, berarti stream live terdeteksi
-                logger.info(f"Account {username} is LIVE! (yt-dlp success)")
-                return True
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
             
-            except subprocess.TimeoutExpired:
-                process.kill()
-                logger.warning(f"Timeout checking if {username} is live")
+            stdout, stderr = process.communicate(timeout=15)
+            
+            # Sukses dengan kode 0 biasanya berarti live
+            if process.returncode == 0:
+                logger.info(f"Account {username} is LIVE (yt-dlp detected)")
+                return True
+                
+            # Cek error spesifik yang menunjukkan tidak live
+            if "This video is not available" in stderr or "HTTP Error 404" in stderr:
+                logger.debug(f"{username} is NOT live (404 error)")
                 return False
-        
+                
+            # Default ke false jika gagal
+            return False
+                
+        except subprocess.TimeoutExpired:
+            process.kill()
+            logger.warning(f"Timeout running yt-dlp for {username}")
+            return False
         except Exception as e:
-            logger.error(f"Error checking if {username} is live: {e}")
+            logger.error(f"Error in yt-dlp check for {username}: {e}")
+            return False
+            
+    def _check_live_with_curl(self, username: str, tiktok_url: str) -> bool:
+        """Cek live dengan curl."""
+        try:
+            # Gunakan cURL dengan header yang tepat
+            curl_cmd = [
+                "curl", 
+                "-s",           # Silent mode
+                "-L",           # Follow redirects
+                "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "--connect-timeout", "5",
+                "-H", "Accept-Language: en-US,en;q=0.9",
+                tiktok_url
+            ]
+            
+            curl_process = subprocess.Popen(
+                curl_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            curl_output, _ = curl_process.communicate(timeout=10)
+            
+            # Perlu pengecekan lebih ketat
+            # 1. Pastikan output tidak kosong
+            if not curl_output:
+                return False
+                
+            # 2. Cek frasa yang pasti hanya muncul di live stream
+            live_indicators = [
+                "isLiveNow\":true",
+                "data-e2e=\"live-status\"",
+                "\"isLive\":true",
+                "LIVE_ROOM_INFO",
+                "\"roomID\":"
+            ]
+            
+            for indicator in live_indicators:
+                if indicator in curl_output:
+                    logger.info(f"Account {username} is LIVE (curl found indicator: {indicator})")
+                    return True
+                    
+            # 3. Cek halaman kosong atau error
+            not_live_indicators = [
+                "Este video no está disponible", 
+                "This video is not available", 
+                "Page not found", 
+                "404 - Halaman Tidak Ditemukan"
+            ]
+            
+            for indicator in not_live_indicators:
+                if indicator in curl_output:
+                    logger.debug(f"{username} is NOT live (page indicates: {indicator})")
+                    return False
+                    
+            # Jika tidak ada indikator yang jelas, lakukan pengecekan konten umum
+            if "LIVE" in curl_output and f"@{username}" in curl_output:
+                # Pengecekan tambahan: pastikan ini adalah tampilan live
+                if "<title>" in curl_output and "LIVE" in curl_output.split("<title>")[1].split("</title>")[0]:
+                    logger.info(f"Account {username} is LIVE (detected with curl title)")
+                    return True
+            
+            logger.debug(f"{username} is NOT live (curl found no live indicators)")
+            return False
+            
+        except subprocess.TimeoutExpired:
+            if curl_process:
+                curl_process.kill()
+            logger.warning(f"Timeout running curl for {username}")
+            return False
+        except Exception as e:
+            logger.error(f"Error in curl check for {username}: {e}")
+            return False
+            
+    def _check_live_with_json(self, username: str, tiktok_url: str) -> bool:
+        """Cek live dengan mengambil info JSON."""
+        try:
+            cmd = [
+                "yt-dlp", 
+                "--no-check-certificate",
+                "--dump-json",
+                "--skip-download",
+                "--quiet",
+                "--force-ipv4",
+                "--socket-timeout", "10",
+                tiktok_url
+            ]
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            stdout, stderr = process.communicate(timeout=15)
+            
+            # Cek jika berhasil mendapatkan JSON
+            if process.returncode == 0 and stdout.strip():
+                try:
+                    # Coba parse JSON
+                    import json
+                    data = json.loads(stdout)
+                    
+                    # Cek indikator status live dalam data
+                    if data.get("is_live", False) or "live" in data.get("format", "").lower():
+                        logger.info(f"Account {username} is LIVE (confirmed by JSON data)")
+                        return True
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse JSON for {username}")
+                    pass
+                    
+            return False
+                
+        except subprocess.TimeoutExpired:
+            process.kill()
+            logger.warning(f"Timeout running JSON check for {username}")
+            return False
+        except Exception as e:
+            logger.error(f"Error in JSON check for {username}: {e}")
             return False
     
     def start_recording(self, username: str):
@@ -566,6 +685,13 @@ class TikTokMonitor:
             # Periksa apakah sudah merekam
             if username in self.recording_processes:
                 logger.info(f"Already recording {username}, skipping")
+                return
+                
+            # Lakukan verifikasi ulang sebelum memulai rekaman
+            if not self._verify_live_status(username):
+                logger.warning(f"Verified {username} is NOT actually live, cancelling recording")
+                # Update status terakhir
+                self.last_check_status[username] = False
                 return
                 
             # Dapatkan kualitas rekaman dari pengaturan
@@ -601,8 +727,8 @@ class TikTokMonitor:
                 "--no-part",                # Gunakan file normal daripada .part file
                 "--no-mtime",               # Jangan ubah waktu modifikasi file
                 "--no-warnings",            # Kurangi pesan warning
-                "--retries", "infinite",    # Coba ulang tanpa batas jika ada error
-                "--fragment-retries", "infinite",  # Coba ulang download fragment tanpa batas
+                "--retries", "10",          # Coba ulang jika ada error (infinite bisa menyebabkan hang)
+                "--fragment-retries", "10", # Coba ulang download fragment (infinite bisa menyebabkan hang)
                 "--force-ipv4",             # Paksa IPv4
                 "--extractor-retries", "3", # Coba beberapa kali jika extractor gagal
                 "-o", file_path,
@@ -634,8 +760,59 @@ class TikTokMonitor:
             }
             
             logger.info(f"Started recording livestream for {username} with quality {quality}")
+            return True
         except Exception as e:
             logger.error(f"Error memulai rekaman {username}: {e}")
+            return False
+            
+    def _verify_live_status(self, username: str) -> bool:
+        """Verifikasi ulang status live sebelum memulai rekaman."""
+        try:
+            # Tunggu sejenak sebelum verifikasi untuk menghindari false positive
+            time.sleep(2)
+            
+            # Verifikasi dengan metode berbeda
+            tiktok_url = f"https://www.tiktok.com/@{username}/live"
+            
+            # Metode FFMPEG untuk cek livestream
+            ffmpeg_result = False
+            try:
+                ffmpeg_cmd = [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    tiktok_url
+                ]
+                ffmpeg_process = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                output, error = ffmpeg_process.communicate(timeout=15)
+                
+                # Jika berhasil akses stream, maka live
+                if ffmpeg_process.returncode == 0 or "description" in error:
+                    ffmpeg_result = True
+            except Exception as e:
+                logger.debug(f"FFMPEG check error for {username}: {e}")
+            
+            # Verifikasi dengan yt-dlp langsung
+            ytdlp_result = self._check_live_with_ytdlp(username, tiktok_url)
+            
+            # Kombinasikan hasil
+            is_really_live = ffmpeg_result or ytdlp_result
+            
+            if not is_really_live:
+                logger.warning(f"Live verification failed for {username}")
+            
+            return is_really_live
+            
+        except Exception as e:
+            logger.error(f"Error verifying live status for {username}: {e}")
+            # Default ke hasil pengecekan sebelumnya jika verifikasi gagal
+            return self.last_check_status.get(username, False)
     
     def stop_recording(self, username: str):
         """Hentikan rekaman livestream TikTok."""
@@ -1420,12 +1597,12 @@ async def main():
         await application.initialize()
         
         # Initialize the monitor
-        notification_task = await monitor.initialize()
+        tasks = await monitor.initialize()
         
         # Start the application
         await application.start()
         
-        # Start polling updates from Telegram
+        # Start polling updates from Telegram - HANYA SEKALI
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         
         # Log that the bot is ready
@@ -1440,15 +1617,13 @@ async def main():
                     await asyncio.sleep(60)
                 except Exception as e:
                     logger.error(f"Error in keepalive: {e}")
-        
-        # Kumpulkan semua task yang harus dijaga tetap hidup
-        tasks = [
-            notification_task,
-            keep_alive(),
-        ]
-        
+                    
         # Jalankan bot tanpa batas waktu sampai diinterupsi manual
-        await asyncio.gather(*tasks)
+        # CATATAN: Tidak menjalankan updater.start_polling lagi di sini
+        await asyncio.gather(
+            tasks,
+            keep_alive(),
+        )
         
     except asyncio.CancelledError:
         # Ini adalah interupsi normal, jangan lakukan apa-apa
@@ -1500,6 +1675,38 @@ if __name__ == "__main__":
     import signal
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Cari proses lain yang mungkin masih berjalan
+    try:
+        logger.info("Checking for other running instances...")
+        ps_cmd = ["ps", "aux"]
+        ps_process = subprocess.Popen(ps_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ps_output, _ = ps_process.communicate()
+        
+        # Hitung jumlah instance script yang sedang berjalan
+        script_name = os.path.basename(__file__)
+        current_pid = os.getpid()
+        running_instances = []
+        
+        for line in ps_output.splitlines():
+            if script_name in line and str(current_pid) not in line.split()[1]:
+                running_instances.append(line.split()[1])  # PID
+                
+        if running_instances:
+            logger.warning(f"Found {len(running_instances)} other instances running: {running_instances}")
+            
+            # Kirim SIGTERM ke instance lainnya
+            for pid in running_instances:
+                try:
+                    logger.info(f"Terminating other instance with PID {pid}")
+                    os.kill(int(pid), signal.SIGTERM)
+                except Exception as e:
+                    logger.error(f"Error terminating PID {pid}: {e}")
+                    
+            # Tunggu beberapa detik agar instance lain keluar
+            time.sleep(5)
+    except Exception as e:
+        logger.error(f"Error while checking for other instances: {e}")
     
     while restart_count < max_restarts:
         try:
