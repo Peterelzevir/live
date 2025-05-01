@@ -2172,7 +2172,8 @@ if __name__ == "__main__":
     if restart_count >= max_restarts:
         logger.critical(f"Exceeded maximum number of restarts ({max_restarts}). Giving up.")
     
-    logger.info("Bot has completely shut down.") running - keepalive check")
+    logger.info("Bot has completely shut down.")
+    logger.info("Running - keepalive check")
                     await asyncio.sleep(60)
                 except Exception as e:
                     logger.error(f"Error in keepalive: {e}")
