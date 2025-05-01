@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
 TELEGRAM_BOT_TOKEN = "7839177497:AAFidAiXoNIJNMzby0-TbsH_FhavI_4w_eo"  # Replace with your new valid token
-ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
+ADMIN_IDS = [1501581833]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 CHECK_INTERVAL = 60  # Interval pengecekan dalam detik (1 menit)
