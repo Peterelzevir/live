@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Konfigurasi bot
 TELEGRAM_BOT_TOKEN = "7839177497:AAFidAiXoNIJNMzby0-TbsH_FhavI_4w_eo"  # Replace with your new valid token
-ADMIN_IDS = [1501581833]  # ID admin Telegram Anda
+ADMIN_IDS = [5988451717]  # ID admin Telegram Anda
 DEFAULT_RECORDING_QUALITY = "720p"  # Kualitas rekaman default
 RECORDING_DIR = "recordings"  # Direktori untuk menyimpan hasil rekaman
 CHECK_INTERVAL = 60  # Interval pengecekan dalam detik (1 menit)
@@ -2172,68 +2172,7 @@ if __name__ == "__main__":
     if restart_count >= max_restarts:
         logger.critical(f"Exceeded maximum number of restarts ({max_restarts}). Giving up.")
     
-    logger.info("Bot has completely shut down.")
-    logger.info("Running - keepalive check")
-                    await asyncio.sleep(60)
-                except Exception as e:
-                    logger.error(f"Error in keepalive: {e}")
-                    
-        # Jalankan bot tanpa batas waktu sampai diinterupsi manual
-        # CATATAN: Tidak menjalankan updater.start_polling lagi di sini
-        await asyncio.gather(
-            tasks,
-            keep_alive(),
-        )
-        
-    except asyncio.CancelledError:
-        # Ini adalah interupsi normal, jangan lakukan apa-apa
-        logger.info("Main task was cancelled, shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Critical error in main application: {e}")
-        # Kirim notifikasi ke admin tentang error
-        for admin_id in ADMIN_IDS:
-            try:
-                await application.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"⚠️ BOT ERROR: {str(e)}\nBot akan dijalankan ulang."
-                )
-            except:
-                pass
-        
-        # Coba jalankan ulang bot setelah error
-        logger.info("Attempting to restart in 5 seconds...")
-        await asyncio.sleep(5)
-        await main()  # Restart bot
-        return
-    finally:
-        # Ini hanya dijalankan jika bot dimatikan dengan sengaja (Ctrl+C)
-        logger.info("Shutting down...")
-        monitor.stop_monitoring()
-        
-        # Make sure the application shuts down properly
-        try:
-            if hasattr(application, 'updater') and application.updater.running:
-                await application.updater.stop()
-            if getattr(application, '_running', False):
-                await application.stop()
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-            
-        logger.info("Bot has been shut down successfully.")
-
-# Script wrapper untuk restart otomatis
-if __name__ == "__main__":
-    max_restarts = 10
-    restart_count = 0
-    
-    # Tambahkan handler khusus untuk exit signal
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}, exiting cleanly")
-        os._exit(0)
-        
-    # Register signal handlers
-    import signal
-    signal.signal(signal.SIGINT, signal_handler)
+    logger.info("Bot has completely shut down.")INT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Cari proses lain yang mungkin masih berjalan
